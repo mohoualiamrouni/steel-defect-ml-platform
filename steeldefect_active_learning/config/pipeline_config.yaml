@@ -1,0 +1,114 @@
+data:
+  image_dir: "steeldefect_active_learning/data/sample_images"  # Path to folder with inspection images
+  image_size: [128, 128]                  # Resize target (H, W)
+  batch_size: 32
+  num_workers: 0                          # 0 for Windows (avoids multiprocessing issues)
+  # Supported extensions (auto-detected loader)
+  extensions: [".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp", ".npy", ".h5", ".hdf5"]
+
+# ─── Single-model A (used for standard active learning) ───────────────────────
+model_a:
+  arch: "resnet18"                        # resnet18 | resnet34 | resnet50 | densenet121 | unet
+  checkpoint: null                        # null = random weights (demo); set path for real model
+  num_classes: 11                         # scratch/pit/roll_mark/edge_crack/inclusion/coil_break/scale/streak/sliver/orange_peel/clean
+  task: "classification"                  # classification | segmentation
+
+# ─── Model B (A/B testing challenger) ────────────────────────────────────────
+model_b:
+  arch: "densenet121"
+  checkpoint: null
+  num_classes: 11
+  task: "classification"
+
+# ─── Standard single-stage active learning ───────────────────────────────────
+active_learning:
+  uncertainty_method: "entropy"           # entropy | margin | least_confidence
+  feature_layer: "avgpool"               # Layer name to hook for embeddings
+  clustering_method: "kmeans"            # kmeans | hdbscan
+  n_clusters: 11                         # Number of diversity clusters (1 per defect class)
+  labeling_budget: 200                   # Images selected per weekly cycle (production)
+  # budget is distributed equally across clusters: budget / n_clusters per cluster
+
+# ─── Anomaly detection (PatchCore / PaDiM) ───────────────────────────────────
+anomaly:
+  enabled: false                          # opt-in; needs a 'clean'-class fit set
+  detector: "patchcore"                   # patchcore | padim
+  fpr: 0.05                               # nominal false-positive rate
+  per_class_fpr: true                     # calibrate one threshold per class (fixes L5:
+                                          # global percentile drifts on the long tail)
+
+# ─── Pipeline active learning (Roth & Small 2008) ────────────────────────────
+# Used when the inspection system has D sequential model stages that form a pipeline.
+# Stage weights β adapt each cycle to focus annotation where it helps most.
+pipeline_al:
+  enabled: false                          # set true to use multi-stage pipeline AL
+  update_rate: 0.1                        # lambda in Algorithm 1 (0.05-0.3)
+  n_cycles: 5                            # number of active learning cycles to simulate
+  budget_per_cycle: 30                   # images to label per cycle
+  # Define each pipeline stage:
+  stages:
+    - arch: "resnet18"
+      checkpoint: null
+      num_classes: 2                      # Stage 1: binary detection (defect / clean)
+      task: "classification"
+      uncertainty_method: "entropy"
+      label: "detection"
+    - arch: "resnet18"
+      checkpoint: null
+      num_classes: 11                     # Stage 2: defect type classification (11 defect classes)
+      task: "classification"
+      uncertainty_method: "entropy"
+      label: "classification"
+
+# ─── Calibration (Guo 2017 + Minderer 2021) ────────────────────────────────
+calibration:
+  enabled: false                          # Set true if you have validation labels
+  val_labels_csv: null                    # CSV with 'path','label' columns
+  temperature_path: "steeldefect_active_learning/outputs/temperature.json"
+  n_bins: 15                              # Bins for reliability diagram
+
+# ─── A/B testing ─────────────────────────────────────────────────────────────
+ab_testing:
+  enabled: true
+  # When both checkpoints are null, the pipeline loads this CSV instead of running
+  # random-weight inference (which produces degenerate 100% disagreement results).
+  # Set to null to force real model inference regardless of checkpoint status.
+  demo_predictions_path: "steeldefect_active_learning/data/demo_ab_predictions.csv"
+  iou_threshold: 0.5                     # IoU threshold for segmentation agreement
+  confidence_threshold: 0.5              # Min confidence to count a prediction
+  alpha: 0.05                            # Significance level (cascade step 2)
+  power: 0.80                            # Target power for sample-size calculations
+  mde: 0.05                              # Minimum detectable effect
+  multiple_testing_correction: "benjamini-hochberg"  # bonferroni | holm | benjamini-hochberg | none
+  srm_threshold: 1.0e-3                  # SRM χ² gate; refuse results below this p
+  expected_arm_ratio: 0.5                # Expected fraction of arm A (50/50 default)
+  bootstrap_n: 1000                      # Resamples for percentile / BCa CIs
+  cuped_covariate: null                  # column name for CUPED variance reduction; null = off
+  sequential: "msprt"                    # null | msprt | obrien_fleming (shadow-mode gate)
+  bayesian_decision_threshold: 0.95      # P(B>A) cutoff for ship/no-ship
+  calibrate_before_comparison: false     # Temperature-scale both models first (Minderer 2021)
+  # ─── Promotion gate (no model reaches Production without passing) ──────────
+  promotion:
+    min_cohens_d: 0.2                     # effect must clear "small"
+    bayesian_threshold: 0.95              # P(B more accurate than A)
+    no_class_regression: true             # veto if any class significantly regresses (BH)
+
+# ─── Reproducibility & observability ─────────────────────────────────────────
+runtime:
+  seed: 42                               # global RNG seed (np / torch / random)
+  log_level: "INFO"                      # DEBUG | INFO | WARNING | ERROR | CRITICAL
+  log_file: null                         # optional file path; null = console only
+
+# ─── Flatness clustering enhancements ────────────────────────────────────────
+flatness_clustering:
+  rocket_n_kernels: 500                   # Dempster 2020; matches features.statistical_features N_KERNELS_E
+  k_selection: "gap_statistic"            # gap_statistic | elbow
+  gap_n_references: 20                    # Tibshirani 2001: number of reference datasets
+  consensus_clustering: false             # Enable multi-algorithm consensus comparison
+
+# ─── Output ──────────────────────────────────────────────────────────────────
+output:
+  dir: "steeldefect_active_learning/outputs"
+  candidates_file: "candidates.csv"      # Selected images for labeling
+  ab_report_file: "ab_report.csv"        # A/B comparison results
+  plots_dir: "steeldefect_active_learning/outputs/plots"
