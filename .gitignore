@@ -1,0 +1,36 @@
+# Databricks Asset Bundle local state
+.databricks/
+*.tfstate
+*.tfstate.*
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Scratch
+_audit_*.py
+_fetch_*.py
+_chk*.py
+_verify_*.py
+
+# Large / non-code assets — kept out of `databricks sync` (Free Edition has a
+# ~10 MB per-file workspace limit) and out of git. The report lives in Overleaf.
+*.pdf
+tn-report/
+docs/
+figures/
+
+# Heavy data artifacts — NOT needed on the cluster (the seed generates its own
+# data on-the-fly). Excluding these keeps `databricks sync` to code only, which
+# is what blew past Free Edition's workspace object limit (20k .npy masks).
+*.npy
+*.parquet
+*.h5
+*.pkl
+*.png
+*.jpg
+*.jpeg
+**/data/synthetic/
+**/data/sample_images/
+**/outputs/
