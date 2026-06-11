@@ -1,0 +1,79 @@
+# =============================================================================
+# steeldefect_ssl (P4) — default configuration
+# Self-supervised foundation model + open-set novelty + continual learning (CPU).
+# Bare run is a SMOKE run (runtime.fast_mode: true, ~4-5 min). Pass --full on the
+# CLI to flip fast_mode off for the ~20-25 min best-results run.
+# =============================================================================
+
+data:
+  image_dir: steeldefect_ssl/data/sample_images
+  image_size: 64
+  grayscale: true
+  to_rgb: false
+  n_total_unlabeled: 4500
+  n_labeled_per_class: 40
+  n_eval_per_class: 30
+  novel_classes: [orange_peel, scale, edge_crack]   # 3 held-out novel families (texture / blotch / edge)
+  stream_n: 2000
+  novel_frac_in_stream: 0.15
+  seed: 42
+  regenerate: false
+
+encoder:
+  arch: ssl_resnet          # ssl_resnet | resnet18
+  embed_dim: 256
+  proj_dim: 128
+  pred_dim: 64
+  in_channels: 1
+  width: 32
+
+ssl:
+  method: simclr            # simclr primary (empirically >> simsiam: 0.803 vs 0.607 linear-probe)
+  compare: false            # comparison off — pour all compute into the primary for the long run
+  epochs: 70                # SimCLR loss still descending at 16 -> train properly
+  batch_size: 256           # more in-batch negatives
+  lr: 0.05
+  weight_decay: 0.0001
+  momentum: 0.9
+  temperature: 0.2          # NT-Xent (SimCLR) only
+  num_workers: 0
+  checkpoint: steeldefect_ssl/outputs/steeldefect_ssl_encoder.pt
+
+openset:
+  scorer: energy            # mahalanobis | knn | cos_proto | energy
+  knn_k: 5
+  shrinkage: 0.001
+  l2_normalize: true        # score on L2-normalised features (SimCLR hypersphere geometry)
+  run_patchcore_baseline: false   # random-init feature baseline used instead (PatchCore crashes on this CPU)
+
+discovery:
+  k_select: gap             # gap | deep_dpm | fixed
+  k_range: [8, 20]
+  fixed_k: null
+  outlier_detection: true
+  outlier_contamination: 0.05
+
+continual:
+  metric: ncm
+  replay_per_class: 0
+
+eval:
+  knn_k: 10
+  raw_pca_dim: 64
+  bootstrap_n: 100
+  known_k: 10
+
+runtime:
+  seed: 42
+  log_level: INFO
+  fast_mode: true
+  device: cpu
+
+output:
+  dir: steeldefect_ssl/outputs
+  plots_dir: steeldefect_ssl/outputs/plots
+  reports_dir: steeldefect_ssl/outputs/reports
+  clear_previous: true
+
+obt_table: steeldefect.obt_segmentations
+mlflow_model_name: steeldefect_ssl_encoder
