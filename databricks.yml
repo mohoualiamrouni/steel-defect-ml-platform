@@ -1,0 +1,260 @@
+# =============================================================================
+# Databricks Asset Bundle — SteelDefect platform
+#
+# Infrastructure-as-code for the OBT pipeline described in the report
+# (chapter "Réalisation", appendix "Plateforme de données"). The task graph here
+# mirrors steeldefect_platform/jobs.py::JOBS_DAG one-to-one; every task invokes the
+# uniform dispatcher steeldefect_platform/run_task.py, which calls the real job_*
+# entrypoints. Deploy with:  databricks bundle deploy -t dev
+#                            databricks bundle run steeldefect_obt_daily -t dev
+#
+# Conceptual DAG nodes deliberately NOT scheduled here (honest scoping):
+#   * segmenter_train  — the CNN is trained off-cluster on GPU; the registry
+#                        receives the resulting model. A/B (ab_decision) is then
+#                        run on demand with the two model URIs as params.
+#   * online_regroup   — long-running Structured Streaming; deployed as a
+#                        continuous job, not a scheduled batch task.
+# =============================================================================
+
+bundle:
+  name: steeldefect-platform
+
+# Ship only the code the jobs need. Skip the vendored Documentation/ tree (large,
+# and some bundled third-party .ipynb files are malformed and break the upload),
+# the LaTeX report, notebooks, caches and local outputs.
+sync:
+  exclude:
+    - "Documentation/"
+    - "tn-report/"
+    - "**/*.ipynb"
+    - "**/__pycache__/"
+    - "**/outputs/"
+    - "**/.pytest_cache/"
+    - "**/*.png"
+
+variables:
+  catalog:
+    description: Unity Catalog holding steeldefect.obt_segmentations
+    default: steeldefect
+  spark_version:
+    description: Databricks Runtime (LTS)
+    default: 15.4.x-scala2.12
+  node_type_id:
+    description: Worker/driver VM type (Azure)
+    default: Standard_DS3_v2
+  max_workers:
+    description: Maximum workers for cluster autoscaling
+    default: 4
+  alert_email:
+    description: Address notified on job failure
+    default: alerts@example.com
+  service_principal:
+    description: Service principal that prod jobs run as (set in prod target)
+    default: ""
+  cycle_start:
+    description: AL cycle start date (weekly pool build)
+    default: "2026-06-01"
+  run_id:
+    description: Re-grouping run identifier (per release)
+    default: "regroup-2026-06"
+  ref_campaign:
+    description: Reference cohort for drift (MMD)
+    default: "campaign-2026-Q1"
+  cur_campaign:
+    description: Current cohort for drift (MMD)
+    default: "campaign-2026-Q2"
+
+resources:
+  jobs:
+
+    # --- One-off: seed the OBT with calibrated-synthetic data (for the demo) ---
+    # Run once after deploy:  databricks bundle run steeldefect_seed -t dev
+    steeldefect_seed:
+      name: "[${bundle.target}] steeldefect-seed"
+      email_notifications:
+        on_failure: ["${var.alert_email}"]
+      timeout_seconds: 7200
+      max_concurrent_runs: 1
+      environments:                          # serverless: deps installed per run
+        - environment_key: steeldefect_env
+          spec:
+            client: "2"
+            dependencies:
+              - scikit-learn
+              - scipy
+              - xgboost
+              - statsmodels
+              - mlflow
+      tasks:
+        - task_key: seed_obt
+          notebook_task:                     # serverless can't read .py via spark_python_task
+            notebook_path: ./seed_notebook.py
+
+    # --- One-off: realistic A/B on the seeded embeddings -> MLflow registry ----
+    steeldefect_ab:
+      name: "[${bundle.target}] steeldefect-ab"
+      email_notifications:
+        on_failure: ["${var.alert_email}"]
+      timeout_seconds: 3600
+      max_concurrent_runs: 1
+      tasks:
+        - task_key: ab_decision
+          notebook_task:
+            notebook_path: ./nb_ab.py
+
+    # --- Daily OBT pipeline: ingest -> severity -> cutting, + maintenance -----
+    steeldefect_obt_daily:
+      name: "[${bundle.target}] steeldefect-obt-daily"
+      email_notifications:
+        on_failure: ["${var.alert_email}"]
+      timeout_seconds: 14400
+      max_concurrent_runs: 1
+      schedule:
+        quartz_cron_expression: "0 0 2 * * ?"   # 02:00 every day
+        timezone_id: Europe/Brussels
+      tasks:                                 # serverless notebook tasks (self-contained)
+        - task_key: ingest
+          max_retries: 2
+          min_retry_interval_millis: 60000
+          notebook_task:
+            notebook_path: ./nb_ingest.py
+        - task_key: severity_score
+          depends_on:
+            - task_key: ingest
+          max_retries: 2
+          min_retry_interval_millis: 60000
+          notebook_task:
+            notebook_path: ./nb_severity.py
+        - task_key: cutting_plan
+          depends_on:
+            - task_key: severity_score
+          notebook_task:
+            notebook_path: ./nb_cutting.py
+        - task_key: drift_monitor
+          depends_on:
+            - task_key: ingest
+          notebook_task:
+            notebook_path: ./nb_drift.py
+        - task_key: optimize_obt          # periodic OPTIMIZE ... ZORDER BY
+          depends_on:
+            - task_key: ingest
+          notebook_task:
+            notebook_path: ./nb_optimize.py
+
+    # --- Weekly active-learning pool build ------------------------------------
+    steeldefect_al_weekly:
+      name: "[${bundle.target}] steeldefect-al-weekly"
+      email_notifications:
+        on_failure: ["${var.alert_email}"]
+      timeout_seconds: 7200
+      max_concurrent_runs: 1
+      environments:                          # serverless: deps installed per run
+        - environment_key: steeldefect_env
+          spec:
+            client: "2"
+            dependencies:
+              - scikit-learn
+              - scipy
+              - xgboost
+              - statsmodels
+              - mlflow
+      schedule:
+        quartz_cron_expression: "0 0 3 ? * MON"  # 03:00 every Monday
+        timezone_id: Europe/Brussels
+      tasks:
+        - task_key: al_pool_build
+          environment_key: steeldefect_env
+          spark_python_task:
+            python_file: steeldefect_platform/run_task.py
+            parameters:
+              - "al_pool_build"
+              - "--params"
+              - '{"cycle_start": "${var.cycle_start}", "budget": 200}'
+
+    # --- Release-triggered defect re-grouping (manual / API trigger) ----------
+    steeldefect_regroup_release:
+      name: "[${bundle.target}] steeldefect-regroup-release"
+      email_notifications:
+        on_failure: ["${var.alert_email}"]
+      timeout_seconds: 10800
+      max_concurrent_runs: 1
+      environments:                          # serverless: deps installed per run
+        - environment_key: steeldefect_env
+          spec:
+            client: "2"
+            dependencies:
+              - scikit-learn
+              - scipy
+              - xgboost
+              - statsmodels
+              - mlflow
+      tasks:
+        - task_key: defect_regroup_train
+          environment_key: steeldefect_env
+          spark_python_task:
+            python_file: steeldefect_platform/run_task.py
+            parameters:
+              - "defect_regroup_train"
+              - "--params"
+              - '{"run_id": "${var.run_id}", "target_k": 28}'
+
+    # --- P4: self-supervised perception (release-triggered, GPU-capable) -------
+    # ssl_pretrain trains the foundation encoder on the unlabeled stream;
+    # embedding_refresh re-embeds the OBT + reports probe/clustering uplift;
+    # openset_score scores the stream for novelty -> steeldefect.novelty_candidates.
+    steeldefect_ssl_release:
+      name: "[${bundle.target}] steeldefect-ssl-release"
+      email_notifications:
+        on_failure: ["${var.alert_email}"]
+      timeout_seconds: 21600
+      max_concurrent_runs: 1
+      environments:                          # serverless: deps installed per run
+        - environment_key: steeldefect_env
+          spec:
+            client: "2"
+            dependencies:
+              - scikit-learn
+              - scipy
+              - xgboost
+              - statsmodels
+              - mlflow
+      tasks:
+        - task_key: ssl_pretrain
+          environment_key: steeldefect_env
+          spark_python_task:
+            python_file: steeldefect_platform/run_task.py
+            parameters: ["ssl_pretrain", "--params", '{"run_id": "${var.run_id}", "epochs": 20}']
+        - task_key: embedding_refresh
+          depends_on:
+            - task_key: ssl_pretrain
+          environment_key: steeldefect_env
+          spark_python_task:
+            python_file: steeldefect_platform/run_task.py
+            parameters: ["embedding_refresh", "--params", '{"run_id": "${var.run_id}"}']
+        - task_key: openset_score
+          depends_on:
+            - task_key: embedding_refresh
+          environment_key: steeldefect_env
+          spark_python_task:
+            python_file: steeldefect_platform/run_task.py
+            parameters: ["openset_score", "--params", '{"since": "2026-01-01", "run_id": "${var.run_id}"}']
+
+targets:
+  # Development: schedules auto-paused, runs/objects prefixed with your user —
+  # safe to deploy into a free/trial workspace for the screenshots.
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://<workspace>.azuredatabricks.net
+
+  # Production: schedules active, deployed under a service principal.
+  prod:
+    mode: production
+    run_as:
+      service_principal_name: ${var.service_principal}   # prod jobs run as an SP, not a user
+    workspace:
+      host: https://<workspace>.azuredatabricks.net
+      root_path: /Shared/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      max_workers: 6
