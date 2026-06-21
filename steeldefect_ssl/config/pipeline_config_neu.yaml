@@ -1,0 +1,88 @@
+# =============================================================================
+# steeldefect_ssl (P4) — EXTERNAL validation on the PUBLIC NEU-DET dataset.
+# NEU-DET (Song & Yan 2013): 1800 grayscale 200x200, 6 hot-rolled-steel classes.
+# This is an INDEPENDENT public dataset — NOT plant data — used to test
+# that the P4 method transfers to real defect images (real plant data was
+# unavailable within the mission window). Each record: source_version=neu-det-v1.
+#
+#   1. Put the 6 class folders under data.image_dir (one folder per class):
+#        steeldefect_ssl/data/neu_det/raw/<class>/*.{png,bmp,jpg}
+#      Verify the on-disk names match data.novel_classes below (mirrors vary).
+#   2. Smoke:  python -m steeldefect_ssl.pipeline.run_pipeline --config steeldefect_ssl/config/pipeline_config_neu.yaml --fast
+#      Full :  python -m steeldefect_ssl.pipeline.run_pipeline --config steeldefect_ssl/config/pipeline_config_neu.yaml --full
+#   Results land in steeldefect_ssl/outputs_neu/ (the 4.6 h synthetic outputs/ is untouched).
+# =============================================================================
+
+data:
+  source: real
+  image_dir: steeldefect_ssl/data/neu_det/raw
+  image_size: 64                # load_gray downsizes 200->64 (keeps encoder calibration + CPU speed)
+  grayscale: true
+  to_rgb: false
+  n_total_unlabeled: 4500       # ignored for source=real (uses the per-class remainder)
+  n_labeled_per_class: 40       # open-set fit / GCD anchors / probe-train (>=5 required)
+  n_eval_per_class: 60          # held-out probe/clustering set; also the leakage-safe known stream
+  novel_classes: [crazing, pitted_surface]   # 2 held out: crazing=diffuse texture (hard), pitted_surface=blob (easy)
+  stream_n: 2000                # ignored for source=real (stream = held-out eval + novel sample)
+  novel_frac_in_stream: 0.5     # balanced known/novel open-set stream
+  seed: 42
+  regenerate: true              # force a clean build on the first real run
+
+encoder:
+  arch: ssl_resnet
+  embed_dim: 256
+  proj_dim: 128
+  pred_dim: 64
+  in_channels: 1
+  width: 32
+
+ssl:
+  method: simclr
+  compare: false
+  epochs: 60
+  batch_size: 64                # CRITICAL: trainer uses drop_last=True; bs must be << the unlabeled pool (~800)
+  lr: 0.05
+  weight_decay: 0.0001
+  momentum: 0.9
+  temperature: 0.2
+  num_workers: 0
+  checkpoint: steeldefect_ssl/outputs_neu/steeldefect_ssl_encoder.pt
+
+openset:
+  scorer: energy
+  knn_k: 5
+  shrinkage: 0.001
+  l2_normalize: true
+  run_patchcore_baseline: false
+
+discovery:
+  k_select: gap
+  k_range: [4, 10]              # 4 known + up to 2 novel
+  fixed_k: null
+  outlier_detection: true
+  outlier_contamination: 0.05
+
+continual:
+  metric: ncm
+  replay_per_class: 0
+
+eval:
+  knn_k: 10
+  raw_pca_dim: 64
+  bootstrap_n: 100
+  known_k: 4                    # 4 known classes (clustering-uplift KMeans)
+
+runtime:
+  seed: 42
+  log_level: INFO
+  fast_mode: true               # smoke by default; pass --full for the genuine run
+  device: cpu
+
+output:
+  dir: steeldefect_ssl/outputs_neu        # ISOLATED — protects the synthetic steeldefect_ssl/outputs/
+  plots_dir: steeldefect_ssl/outputs_neu/plots
+  reports_dir: steeldefect_ssl/outputs_neu/reports
+  clear_previous: true              # only wipes outputs_neu
+
+obt_table: steeldefect.obt_segmentations
+mlflow_model_name: steeldefect_ssl_encoder
