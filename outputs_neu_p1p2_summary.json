@@ -1,0 +1,35 @@
+{
+  "source_version": "neu-det-v1",
+  "dataset": "NEU-DET (public)",
+  "classes": [
+    "crazing",
+    "inclusion",
+    "patches",
+    "pitted_surface",
+    "rolled-in_scale",
+    "scratches"
+  ],
+  "P2_H2": {
+    "source_version": "neu-det-v1",
+    "n_samples": 1800,
+    "n_clusters": 6,
+    "cnn_only_nmi": 0.8765,
+    "fusion_nmi": 0.8776,
+    "fusion_nmi_ci": [
+      0.8643,
+      0.8963
+    ],
+    "delta_nmi": 0.0011,
+    "fusion_ari": 0.8616,
+    "H2_pass": false
+  },
+  "P1_H1": {
+    "reference_strategy": "typiclust",
+    "ref_budget": 100,
+    "target_macro_f1": 0.9034,
+    "baseline": "random",
+    "baseline_budget_to_match": 100,
+    "savings_ratio": 1.0,
+    "source_version": "neu-det-v1"
+  }
+}
