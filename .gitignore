@@ -34,3 +34,19 @@ figures/
 **/data/synthetic/
 **/data/sample_images/
 **/outputs/
+
+# Vendored third-party reference implementations and papers (not part of this project)
+Documentation/
+
+# Model weights and serialized artifacts
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.joblib
+*.npz
+
+# Run outputs and logs
+**/outputs_neu/
+*.log
