@@ -91,3 +91,45 @@ def test_known_extra_section_does_not_raise(tmp_path):
     """)
     cfg = load_config(str(cfg_path))
     assert cfg is not None
+
+
+_SHIPPED = Path(__file__).resolve().parents[1] / "config" / "pipeline_config.yaml"
+
+
+def test_shipped_default_config_loads():
+    """The YAML shipped with the package must load through its own schema."""
+    cfg = load_config(str(_SHIPPED))
+    assert cfg.anomaly.detector == "patchcore"
+    assert cfg.anomaly.per_class_fpr is True
+    assert cfg.ab_testing.promotion.min_cohens_d == 0.2
+    assert cfg.ab_testing.promotion.bayesian_threshold == 0.95
+    assert cfg.ab_testing.promotion.no_class_regression is True
+
+
+def test_unknown_promotion_key_raises(tmp_path):
+    cfg_path = _write(tmp_path, """
+        ab_testing:
+          promotion:
+            min_cohen_d: 0.2  # typo
+    """)
+    with pytest.raises(ValueError, match="min_cohen_d"):
+        load_config(str(cfg_path))
+
+
+def test_promotion_threshold_out_of_range_raises(tmp_path):
+    cfg_path = _write(tmp_path, """
+        ab_testing:
+          promotion:
+            bayesian_threshold: 1.5
+    """)
+    with pytest.raises(ValueError, match=r"promotion\.bayesian_threshold"):
+        load_config(str(cfg_path))
+
+
+def test_invalid_anomaly_detector_raises(tmp_path):
+    cfg_path = _write(tmp_path, """
+        anomaly:
+          detector: "isolation_forest"
+    """)
+    with pytest.raises(ValueError, match=r"anomaly\.detector must be one of"):
+        load_config(str(cfg_path))

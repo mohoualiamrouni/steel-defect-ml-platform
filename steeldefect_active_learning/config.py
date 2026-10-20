@@ -59,6 +59,20 @@ class ActiveLearningConfig:
 
 
 @dataclass
+class PromotionConfig:
+    """Thresholds of the A/B promotion gate (``ab_testing.promotion.decide_promotion``).
+
+    Attributes:
+        min_cohens_d:         Minimum |Cohen's d| for the difference to count.
+        bayesian_threshold:   Minimum Bayesian P(B more accurate than A).
+        no_class_regression:  Veto promotion if any class significantly regresses.
+    """
+    min_cohens_d: float = 0.2
+    bayesian_threshold: float = 0.95
+    no_class_regression: bool = True
+
+
+@dataclass
 class ABTestingConfig:
     """Statistical A/B-testing configuration (cascade in example-report.tex §3).
 
@@ -91,6 +105,7 @@ class ABTestingConfig:
                                        layer (default 0.95).
         calibrate_before_comparison:   Temperature-scale both models before comparing
                                        (Minderer 2021).
+        promotion:                     Thresholds of the promotion gate (nested section).
     """
     enabled: bool = True
     iou_threshold: float = 0.5
@@ -107,6 +122,7 @@ class ABTestingConfig:
     sequential: Optional[str] = None
     bayesian_decision_threshold: float = 0.95
     calibrate_before_comparison: bool = False
+    promotion: PromotionConfig = field(default_factory=PromotionConfig)
 
 
 @dataclass
@@ -195,6 +211,11 @@ class AnomalyConfig:
         model_path:        Where to save/load the fitted PatchCore model (pickle).
         backbone:          CNN backbone for feature extraction (default resnet18).
         device:            'cpu' or 'cuda'.
+        detector:          'patchcore' or 'padim'. The CLI pipeline fits PatchCore
+                           only; PaDiM has no threshold API yet.
+        per_class_fpr:     One threshold per class via PatchCoreDetector.fit_per_class
+                           (needs a labelled calibration set; not wired in the CLI
+                           pipeline yet).
     """
     enabled: bool = False
     normal_class: str = "clean"
@@ -203,6 +224,8 @@ class AnomalyConfig:
     model_path: str = "steeldefect_active_learning/outputs/patchcore.pkl"
     backbone: str = "resnet18"
     device: str = "cpu"
+    detector: str = "patchcore"
+    per_class_fpr: bool = False
 
 
 @dataclass
@@ -281,6 +304,21 @@ def _validate(cfg: PipelineConfig) -> None:
             "ab_testing.bayesian_decision_threshold must be in (0,1), got "
             f"{ab.bayesian_decision_threshold!r}"
         )
+    pr = ab.promotion
+    if pr.min_cohens_d < 0:
+        raise ValueError(
+            f"ab_testing.promotion.min_cohens_d must be >= 0, got {pr.min_cohens_d!r}"
+        )
+    if not (0.0 < pr.bayesian_threshold < 1.0):
+        raise ValueError(
+            "ab_testing.promotion.bayesian_threshold must be in (0,1), got "
+            f"{pr.bayesian_threshold!r}"
+        )
+    if cfg.anomaly.detector not in {"patchcore", "padim"}:
+        raise ValueError(
+            "anomaly.detector must be one of {'patchcore','padim'}, "
+            f"got {cfg.anomaly.detector!r}"
+        )
     pal = cfg.pipeline_al
     if pal.update_rate < 0:
         raise ValueError(f"pipeline_al.update_rate must be >= 0, got {pal.update_rate!r}")
@@ -332,6 +370,14 @@ def load_config(path: str) -> PipelineConfig:
         for i, s in enumerate(stages_raw)
     ]
 
+    # ab_testing.promotion is a nested section: build it with the same strict checks
+    ab_raw = dict(raw.get("ab_testing") or {})
+    promotion_raw = ab_raw.pop("promotion", None)
+    ab_cfg = _dict_to_dataclass(ABTestingConfig, ab_raw, _path="ab_testing")
+    ab_cfg.promotion = _dict_to_dataclass(
+        PromotionConfig, promotion_raw, _path="ab_testing.promotion",
+    )
+
     cfg = PipelineConfig(
         data=_dict_to_dataclass(DataConfig, raw.get("data"), _path="data"),
         model_a=_dict_to_dataclass(ModelConfig, raw.get("model_a"), _path="model_a"),
@@ -340,7 +386,7 @@ def load_config(path: str) -> PipelineConfig:
             ActiveLearningConfig, raw.get("active_learning"), _path="active_learning",
         ),
         pipeline_al=pal_cfg,
-        ab_testing=_dict_to_dataclass(ABTestingConfig, raw.get("ab_testing"), _path="ab_testing"),
+        ab_testing=ab_cfg,
         calibration=_dict_to_dataclass(CalibrationConfig, raw.get("calibration"), _path="calibration"),
         anomaly=_dict_to_dataclass(AnomalyConfig, raw.get("anomaly"), _path="anomaly"),
         output=_dict_to_dataclass(OutputConfig, raw.get("output"), _path="output"),
