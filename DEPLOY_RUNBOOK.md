@@ -48,8 +48,9 @@ databricks current-user me
 ```
 
 ## 3. Point the bundle at your workspace
-Edit the two `workspace.host:` lines in `databricks.yml` (the `dev` and `prod`
-targets) to your workspace URL. Then validate:
+The bundle does not pin a workspace: the CLI targets the workspace of the profile
+you authenticated in step 2, or the one in `DATABRICKS_HOST`. To use another
+profile, pass `-p <profile>` or set `DATABRICKS_CONFIG_PROFILE`. Then validate:
 ```bash
 databricks bundle validate -t dev
 ```

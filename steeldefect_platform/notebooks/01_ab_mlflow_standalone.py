@@ -28,7 +28,16 @@ r = rng.permutation(N)
 tr, te = r[: int(0.7 * N)], r[int(0.7 * N):]
 
 acc = {}
-mlflow.set_experiment("/Users/user@example.com/steeldefect_ab_demo")
+def _experiment_path(name: str) -> str:
+    """Experiment under the current user's home, resolved at run time."""
+    try:
+        ctx = dbutils.notebook.entry_point.getDbutils().notebook().getContext()  # noqa: F821
+        return f"/Users/{ctx.userName().get()}/{name}"
+    except Exception:
+        return f"/Shared/{name}"
+
+
+mlflow.set_experiment(_experiment_path("steeldefect_ab_demo"))
 # incumbent A trained on half the labels; challenger B on all of them
 for tag, sub in (("A", tr[: len(tr) // 2]), ("B", tr)):
     with mlflow.start_run(run_name=f"segmenter_{tag}"):

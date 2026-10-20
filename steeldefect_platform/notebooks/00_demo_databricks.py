@@ -14,7 +14,8 @@
 
 # COMMAND ----------
 # MAGIC %md ### 0. Point Python at the synced repo, create the schema
-# MAGIC Edit `REPO` to where you synced the repo (see the chat instructions).
+# MAGIC The repository root comes from `STEELDEFECT_WORKSPACE_ROOT` when it is set,
+# MAGIC otherwise it is derived from this notebook's own location.
 
 # COMMAND ----------
 import os, sys, shutil
@@ -22,8 +23,28 @@ import os, sys, shutil
 # Serverless cannot reliably `import` .py directly from /Workspace (the FUSE mount
 # doesn't support the mmap the import machinery uses -> [Errno 5]). Fix: copy the
 # packages to local disk once, then import from there.
-SRC = "/Workspace/Users/user@example.com/steel-defect-ml-platform"
 DST = "/tmp/steeldefect"
+
+
+def _repo_root_in_workspace(local_copy: str) -> str:
+    """Where this repository lives in the workspace.
+
+    STEELDEFECT_WORKSPACE_ROOT wins when set (ignoring the local copy this cell
+    points it at), then the root derived from this notebook's own path
+    (<root>/steeldefect_platform/notebooks/<name>), then the Repos convention.
+    """
+    env_root = os.environ.get("STEELDEFECT_WORKSPACE_ROOT")
+    if env_root and env_root != local_copy:
+        return env_root
+    try:
+        ctx = dbutils.notebook.entry_point.getDbutils().notebook().getContext()  # noqa: F821
+        root = ctx.notebookPath().get().rsplit("/", 3)[0]
+        return root if root.startswith("/Workspace") else "/Workspace" + root
+    except Exception:
+        return "/Workspace/Repos/steel-defect-ml-platform"
+
+
+SRC = _repo_root_in_workspace(DST)
 for pkg in ("steeldefect_platform", "datamining"):
     src = f"{SRC}/{pkg}"
     if os.path.isdir(src):

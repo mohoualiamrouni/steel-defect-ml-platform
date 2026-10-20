@@ -240,13 +240,13 @@ resources:
             parameters: ["openset_score", "--params", '{"since": "2026-01-01", "run_id": "${var.run_id}"}']
 
 targets:
+  # No workspace host is pinned here: the Databricks CLI uses the workspace of the
+  # authenticated profile (databricks auth login) or DATABRICKS_HOST.
   # Development: schedules auto-paused, runs/objects prefixed with your user —
   # safe to deploy into a free/trial workspace for the screenshots.
   dev:
     mode: development
     default: true
-    workspace:
-      host: https://<workspace>.azuredatabricks.net
 
   # Production: schedules active, deployed under a service principal.
   prod:
@@ -254,7 +254,6 @@ targets:
     run_as:
       service_principal_name: ${var.service_principal}   # prod jobs run as an SP, not a user
     workspace:
-      host: https://<workspace>.azuredatabricks.net
       root_path: /Shared/.bundle/${bundle.name}/${bundle.target}
     variables:
       max_workers: 6
