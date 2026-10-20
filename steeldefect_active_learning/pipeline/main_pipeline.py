@@ -664,6 +664,10 @@ def run_pipeline(cfg: PipelineConfig) -> None:
         _row("Coreset ratio",   cfg.anomaly.coreset_ratio)
         _row("FPR threshold",   cfg.anomaly.fpr)
         _row("Model path",      cfg.anomaly.model_path)
+        if cfg.anomaly.detector != "patchcore" or cfg.anomaly.per_class_fpr:
+            _warn(f"anomaly.detector={cfg.anomaly.detector!r}, per_class_fpr="
+                  f"{cfg.anomaly.per_class_fpr}: this pipeline implements PatchCore "
+                  "with a global threshold only, so that is what runs.")
         try:
             from steeldefect_active_learning.active_learning.anomaly import PatchCoreDetector
             from PIL import Image as _PILImage
