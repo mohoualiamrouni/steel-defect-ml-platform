@@ -4,6 +4,15 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import torch
+
+
+@pytest.fixture(autouse=True)
+def _seed_torch():
+    """Seed torch's global RNG before every test: several tests draw random
+    tensors or apply random augmentations, and must see the same inputs on
+    every run."""
+    torch.manual_seed(0)
 
 
 @pytest.fixture
