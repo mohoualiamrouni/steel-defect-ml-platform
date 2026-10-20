@@ -145,9 +145,11 @@ def run_clustering_training(
             clusterer.save(clusterer_path)
             mlflow.log_artifact(clusterer_path, artifact_path="models")
 
-            # Register model in MLflow Model Registry
+            # Register the full CoilClusterer (scaler, estimator and its nearest-
+            # centroid predict), not the inner estimator fitted on scaled features:
+            # a model loaded from the registry must work on raw features.
             mlflow.sklearn.log_model(
-                clusterer._model,
+                clusterer,
                 artifact_path="sklearn_model",
                 registered_model_name="steeldefect_flatness_clusterer",
             )
