@@ -88,13 +88,18 @@ def decide_promotion(
     reasons.append(_crit("mcnemar_paired", mc_ok,
                          f"p={mc.get('p_value')}, b={b}, c={c} (B better iff c≥b)"))
 
-    # 7. no class significantly regresses; collect per-class wins/regressions
+    # 7. no class significantly regresses; collect per-class wins/regressions.
+    # Rows come from per_class_mcnemar: b = A correct and B wrong, c = A wrong
+    # and B correct, so acc_b - acc_a = (c - b) / n on that class.
     per_class_promote: List[str] = []
     per_class_regress: List[str] = []
     for row in pcm.get("rows", []) or []:
         reject = bool(row.get("reject", False))
-        delta = float(row.get("delta", 0.0))  # acc_b - acc_a
-        name = str(row.get("class_name", row.get("class", "?")))
+        if row.get("b") is not None and row.get("c") is not None:
+            delta = (int(row["c"]) - int(row["b"])) / max(int(row.get("n", 0)), 1)
+        else:
+            delta = float(row.get("delta", 0.0))  # acc_b - acc_a, if supplied directly
+        name = str(row.get("class_name", row.get("class", row.get("class_id", "?"))))
         if reject and delta > 0:
             per_class_promote.append(name)
         elif reject and delta < 0:
