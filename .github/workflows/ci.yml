@@ -27,7 +27,7 @@ jobs:
       - name: Syntax check (compileall)
         run: |
           python -m compileall -q steeldefect_platform steeldefect_ssl steeldefect_active_learning \
-            defect_clustering datamining
+            defect_clustering datamining flatness_clustering
 
       - name: Run test suites
         env:
