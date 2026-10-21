@@ -67,7 +67,8 @@ def _feature_table(n_per_cluster: int = 20, seed: int = 0):
     return table, raw
 
 
-def test_registered_model_reproduces_clusterer_predictions(tmp_path, monkeypatch):
+@pytest.mark.parametrize("method", ["kmeans", "hdbscan"])
+def test_registered_model_reproduces_clusterer_predictions(tmp_path, monkeypatch, method):
     table, raw = _feature_table()
     monkeypatch.setattr(job, "spark", _FakeSpark(table), raising=False)
     original_uri = mlflow.get_tracking_uri()
@@ -75,7 +76,8 @@ def test_registered_model_reproduces_clusterer_predictions(tmp_path, monkeypatch
     try:
         mlflow.create_experiment("flatness-test", artifact_location=(tmp_path / "artifacts").as_uri())
         job.run_clustering_training(
-            n_clusters=3, mlflow_experiment="flatness-test", artifact_dir=str(tmp_path / "models"),
+            n_clusters=3, method=method, mlflow_experiment="flatness-test",
+            artifact_dir=str(tmp_path / "models"),
         )
         # Loaded exactly as flatness_clustering/databricks/03_online_assignment.py does.
         registered = mlflow.sklearn.load_model("models:/steeldefect_flatness_clusterer/1")
