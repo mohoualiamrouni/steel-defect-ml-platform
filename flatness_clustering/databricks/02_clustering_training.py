@@ -38,6 +38,22 @@ except ImportError:
     _MLFLOW_AVAILABLE = False
 
 
+def _registry_log_kwargs(clusterer) -> dict:
+    """Extra ``log_model`` arguments for MLflow versions that serialize with skops.
+
+    Recent MLflow serializes scikit-learn models with skops, which rejects every
+    type it does not trust. The clusterer was trained right here, so the types it
+    contains (CoilClusterer and, for some methods, a non-sklearn estimator) are
+    declared trusted. Older MLflow versions pickle the model and take no such
+    argument.
+    """
+    import inspect
+    if "skops_trusted_types" not in inspect.signature(mlflow.sklearn.log_model).parameters:
+        return {}
+    import skops.io as sio
+    return {"skops_trusted_types": sio.get_untrusted_types(data=sio.dumps(clusterer))}
+
+
 def run_clustering_training(
     feature_table:     str = "steeldefect_flatness.coil_features",
     assignment_table:  str = "steeldefect_flatness.cluster_assignments",
@@ -152,6 +168,7 @@ def run_clustering_training(
                 clusterer,
                 artifact_path="sklearn_model",
                 registered_model_name="steeldefect_flatness_clusterer",
+                **_registry_log_kwargs(clusterer),
             )
 
             run_id = mlflow.active_run().info.run_id
