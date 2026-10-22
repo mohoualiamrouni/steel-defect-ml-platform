@@ -2,26 +2,46 @@
 # Databricks Asset Bundle — SteelDefect platform
 #
 # Infrastructure-as-code for the OBT pipeline described in the report
-# (chapter "Réalisation", appendix "Plateforme de données"). The task graph here
-# mirrors steeldefect_platform/jobs.py::JOBS_DAG one-to-one; every task invokes the
-# uniform dispatcher steeldefect_platform/run_task.py, which calls the real job_*
-# entrypoints. Deploy with:  databricks bundle deploy -t dev
-#                            databricks bundle run steeldefect_obt_daily -t dev
+# (chapter "Réalisation", appendix "Plateforme de données"). The bundle declares
+# six jobs whose task keys reuse the node names of
+# steeldefect_platform/jobs.py::JOBS_DAG (plus seed_obt). Only the daily OBT job
+# (02:00) and the weekly AL job (Monday 03:00) are scheduled; the seed, A/B,
+# regroup and SSL jobs run on demand. Dependencies across jobs are therefore not
+# enforced, and openset_score runs after embedding_refresh rather than after
+# ingest.
+#
+# The tasks of the AL, regroup and SSL jobs invoke the uniform dispatcher
+# steeldefect_platform/run_task.py, which calls the real job_* entrypoints. The
+# seed, A/B and daily OBT tasks (7 of 12) run simplified, self-contained stand-in
+# notebooks (seed_notebook.py, nb_*.py) because, on the serverless workspace
+# used, reading workspace .py files failed with
+# 409 BlobCustomerSpecifiedEncryptionMismatch. For example, nb_severity.py fits
+# least squares with a fixed band instead of XGBoost + CQR, nb_ingest.py appends
+# a fixed synthetic batch instead of merging, and nb_ab.py only registers two
+# model versions (no A/B test). The run_task.py tasks import the package from
+# workspace .py files too, so they are exposed to the same error on that
+# workspace.
+#
+# Deploy with:  databricks bundle deploy -t dev
+#               databricks bundle run steeldefect_obt_daily -t dev
 #
 # Conceptual DAG nodes deliberately NOT scheduled here (honest scoping):
-#   * segmenter_train  — the CNN is trained off-cluster on GPU; the registry
-#                        receives the resulting model. A/B (ab_decision) is then
-#                        run on demand with the two model URIs as params.
-#   * online_regroup   — long-running Structured Streaming; deployed as a
-#                        continuous job, not a scheduled batch task.
+#   * segmenter_train  — the inspection CNN is trained outside this repository
+#                        (no training code or GPU job here). The package's A/B
+#                        gate (jobs.job_ab_decision) takes the two model URIs;
+#                        the bundle's ab_decision task runs nb_ab.py, which takes
+#                        none.
+#   * online_regroup   — long-running Structured Streaming
+#                        (defect_clustering/databricks/03_online_regroup.py); it
+#                        would run as a continuous job and is not deployed.
 # =============================================================================
 
 bundle:
   name: steeldefect-platform
 
-# Ship only the code the jobs need. Skip the vendored Documentation/ tree (large,
-# and some bundled third-party .ipynb files are malformed and break the upload),
-# the LaTeX report, notebooks, caches and local outputs.
+# Ship only the code the jobs need: skip notebooks (.ipynb), caches, local outputs
+# and images, plus Documentation/ and tn-report/ if such local folders sit in the
+# clone (both are git-ignored and not part of this repository).
 sync:
   exclude:
     - "Documentation/"
@@ -90,7 +110,7 @@ resources:
           notebook_task:                     # serverless can't read .py via spark_python_task
             notebook_path: ./seed_notebook.py
 
-    # --- One-off: realistic A/B on the seeded embeddings -> MLflow registry ----
+    # --- One-off: register two model versions + champion/challenger aliases ----
     steeldefect_ab:
       name: "[${bundle.target}] steeldefect-ab"
       email_notifications:
@@ -198,10 +218,11 @@ resources:
               - "--params"
               - '{"run_id": "${var.run_id}", "target_k": 28}'
 
-    # --- P4: self-supervised perception (release-triggered, GPU-capable) -------
-    # ssl_pretrain trains the foundation encoder on the unlabeled stream;
-    # embedding_refresh re-embeds the OBT + reports probe/clustering uplift;
-    # openset_score scores the stream for novelty -> steeldefect.novelty_candidates.
+    # --- P4: self-supervised encoder (on demand, serverless CPU) --------------
+    # ssl_pretrain trains the SSL encoder on the calibrated-synthetic unlabeled pool;
+    # embedding_refresh re-embeds the labeled/eval pools and reports probe/clustering
+    # uplift (it does not rewrite the OBT); openset_score scores the synthetic stream
+    # for novelty -> steeldefect.novelty_candidates.
     steeldefect_ssl_release:
       name: "[${bundle.target}] steeldefect-ssl-release"
       email_notifications:

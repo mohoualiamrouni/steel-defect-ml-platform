@@ -1,19 +1,22 @@
 """steeldefect_ssl — Pipeline P4 of the SteelDefect ecosystem.
 
-Self-supervised foundation model + open-set novelty detection + continual
-learning, designed to run on CPU. Turns perception into a self-improving loop:
+Self-supervised encoder (SSLResNet, ~1.3M parameters) + open-set novelty detection + continual
+learning, designed to run on CPU. The intended loop, tested as hypothesis H4:
 
     SSL encoder on the unlabeled stream
       -> better embeddings for P1 (active learning) and P2 (clustering)
-      -> open-set detection of NOVEL defect families outside the 28 groups
+      -> open-set detection of NOVEL defect families held out of the known classes
       -> generalized category discovery + continual integration (no forgetting).
 
 Hypothesis H4: an encoder pretrained self-supervised on the unlabeled stream
-improves P2 clustering (NMI) and detects a held-out novel family (open-set
-AUROC) that the fixed taxonomy misses.
+improves P2 clustering (NMI) and detects held-out defect families (open-set
+AUROC).
 
-All data is calibrated-synthetic (``source_version='synthetic-cal-v1'``),
-seed 42, CPU-only. No new dependencies beyond the repo ``requirements.txt``.
+The default configuration runs on calibrated-synthetic data
+(``source_version='synthetic-cal-v1'``, seed 42);
+``steeldefect_ssl/config/pipeline_config_neu.yaml`` runs it on the public NEU-DET
+images (``source_version='neu-det-v1'``). CPU-only. No new dependencies beyond the
+repo ``requirements.txt``.
 """
 
 __version__ = "0.1.0"

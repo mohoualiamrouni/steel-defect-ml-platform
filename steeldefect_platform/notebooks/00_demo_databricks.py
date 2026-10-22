@@ -7,7 +7,7 @@
 # MAGIC 2. a real **Delta history** (WRITE / MERGE / OPTIMIZE)  -> screenshot;
 # MAGIC 3. live **H3 numerical metrics** (grade fractions, yield) from the real
 # MAGIC    guillotine cutting optimiser  -> screenshot (better than a pytest dump);
-# MAGIC 4. an **MLflow A/B** run with real accuracies  -> screenshot.
+# MAGIC 4. an **MLflow A/B** run with accuracies measured on the synthetic data  -> screenshot.
 # MAGIC
 # MAGIC Data is synthetic (`source_version = synthetic-cal-v1`); this proves the
 # MAGIC architecture runs, not production numbers.
@@ -127,7 +127,7 @@ display(spark.sql("""
 """))
 
 # COMMAND ----------
-# MAGIC %md ### 4. MLflow A/B with real accuracies  → **screenshot the Experiment**
+# MAGIC %md ### 4. MLflow A/B with measured accuracies (synthetic data)  → **screenshot the Experiment**
 # MAGIC Trains two segmenter heads on the seeded embeddings (A on half the labels,
 # MAGIC B on all) and logs the comparison. No model-registry write, so it works on
 # MAGIC Free Edition's Unity-Catalog registry without 3-level naming.

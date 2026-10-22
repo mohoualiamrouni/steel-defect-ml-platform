@@ -1,1 +1,1 @@
-"""Self-supervised pretraining: SimSiam (primary) + SimCLR/NT-Xent (comparison)."""
+"""Self-supervised pretraining: SimCLR/NT-Xent (primary) + SimSiam (comparison, off by default)."""

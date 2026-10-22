@@ -895,7 +895,8 @@ def generate_demo_ab_data(
     Avoids the degenerate case of random-weight models (which predict the same
     class for every image, giving 0% disagreement and meaningless statistics).
 
-    Confusion structure is calibrated to real inspection patterns:
+    Confusion pairs are chosen from domain knowledge of which defects look
+    alike; they are not fitted to real inspection data:
     - scratch  ↔ streak   (both longitudinal, similar contrast)
     - pit      ↔ inclusion (both spot-like)
     - roll_mark ↔ coil_break (both transverse band patterns)
@@ -904,9 +905,11 @@ def generate_demo_ab_data(
     - edge_crack has low confusion rate (unique location signature)
     - clean is frequently confused with low-contrast defects (scale, orange_peel)
 
-    Model A: well-trained production model (~85% overall, high confidence).
-    Model B: challenger model (~72% overall, lower confidence on most classes,
-             but *better* on 3 classes where it was specifically retrained).
+    Model A: simulated incumbent model (accuracy 0.85 by default, 0.78-0.82 on
+             edge_crack, sliver and orange_peel).
+    Model B: simulated challenger model (accuracy 0.82 by default, but *better*
+             on the 3 classes where it was specifically retrained: 0.88-0.92).
+    Overall accuracy therefore depends on the class mix.
 
     The mixed-result design (B better on some classes, worse on others) creates
     a realistic A/B comparison where the decision isn't trivially "A wins

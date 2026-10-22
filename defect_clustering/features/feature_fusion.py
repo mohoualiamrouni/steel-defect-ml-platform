@@ -35,7 +35,8 @@ def fuse_features(
     Parameters
     ----------
     cnn_features : np.ndarray
-        ``(N, D_cnn)`` array, typically ``(N, 960)`` from EfficientNet.
+        ``(N, D_cnn)`` array, typically ``(N, 960)`` from the inspection CNN
+        (``(N, 1280)`` for the EfficientNet-B0 used on NEU-DET).
     seg_features : np.ndarray
         ``(N, D_seg)`` array, typically ``(N, 48)`` segmentation statistics.
     method : str

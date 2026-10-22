@@ -1,9 +1,7 @@
 # SteelDefect platform — deploy & capture proof (runbook)
 
-Goal: turn the *asserted* "Azure Databricks platform" into **three screenshots**
-a jury can't argue with, by actually deploying `databricks.yml` and running it on
-a real workspace (synthetic data — that's fine; this proves the **architecture**,
-not production numbers).
+Goal: deploy `databricks.yml` on a real workspace and capture **three screenshots**
+(synthetic data: this shows that the **architecture** runs, not production numbers).
 
 > **No workspace handy?** `python -m steeldefect_platform.demo_industrialization`
 > runs the *operational* guarantees locally in ~70 s (no cluster, no GPU):
@@ -11,15 +9,15 @@ not production numbers).
 > MMD/ADWIN power with confidence intervals, and a real MLflow alias
 > promote→rollback round-trip. It prints a metrics table and writes
 > `steeldefect_platform/outputs/industrialization_metrics.json`. The Delta
-> `MERGE`/streaming/`OPTIMIZE` parts below still need a real workspace.
+> `MERGE`/`OPTIMIZE` parts below still need a real workspace.
 
-## What you'll end up with (paste these into the report appendix)
+## What you'll end up with
 1. **Jobs run-graph** — the `steeldefect_obt_daily` DAG (`ingest → severity_score →
    cutting_plan`, plus `drift_monitor` and `optimize_obt`) showing green tasks.
-2. **MLflow** — the experiment with the A/B comparison and the registered model
-   versions (incumbent A vs challenger B).
+2. **MLflow** — the registered model versions and their `champion` / `challenger`
+   aliases (the bundle logs no A/B comparison).
 3. **Delta history** — `DESCRIBE HISTORY steeldefect.obt_segmentations` showing the
-   `STREAMING UPDATE` / `MERGE` / `OPTIMIZE` operations (time travel is real).
+   `WRITE` / `MERGE` / `OPTIMIZE` operations (time travel is real).
 
 ---
 
@@ -30,15 +28,14 @@ not production numbers).
 
 ## 1. Get a free workspace
 
-**Path A — Azure free trial (recommended, most faithful to the report).**
+**Path A — Azure free trial (recommended: the platform targets Azure Databricks).**
 Azure gives a 30-day / credit trial. Create an **Azure Databricks** resource
 (Premium tier needed for Unity Catalog/MLflow Registry), open the workspace.
-The `new_cluster` job clusters in `databricks.yml` work as-is here.
+The bundle runs on serverless compute (no job clusters), so it deploys as-is here.
 
 **Path B — Databricks Free Edition (zero cost, fastest).**
-Sign up at the Databricks Free Edition. Caveat: it is **serverless-only**, so the
-`job_clusters:` (`new_cluster`) blocks aren't allowed — see the one-line switch
-in the Caveats section. Everything else (Jobs, Unity Catalog, MLflow) works.
+Sign up at the Databricks Free Edition. It is **serverless-only**, which is what the
+bundle uses, so no change is needed. Jobs, Unity Catalog and MLflow work.
 
 ## 2. Authenticate the CLI
 ```bash
@@ -63,18 +60,21 @@ tables and writes structured synthetic data across several Delta operations
 (`WRITE → WRITE → MERGE → OPTIMIZE`), so the history screenshot is rich, and
 (optionally) logs an MLflow A/B with two registered model versions.
 
-**Easiest — run it as a bundle job** (after step 5's deploy):
+**Easiest — run the bundle's seed job** (after step 5's deploy). It runs
+`seed_notebook.py`, a self-contained version of this seeder without the MLflow step:
 ```bash
 databricks bundle run steeldefect_seed -t dev
 ```
 
 **Or in a workspace notebook** (handy if you want to watch the prints):
 ```python
-import sys; sys.path.insert(0, "/Workspace/Repos/<you>/the plant")  # repo root
+import sys; sys.path.insert(0, "/Workspace/Repos/<you>/steel-defect-ml-platform")  # repo root
 from steeldefect_platform.seed_obt import seed
 summary = seed(spark, n_coils=40, with_mlflow=True)
 summary   # -> {'rows': ..., 'partitions': ..., 'history_versions': ..., 'mlflow_ab': True}
 ```
+On the serverless workspace used for this project, importing workspace files this way
+failed with the 409 error described in the caveats; the bundle's seed job avoids it.
 The embeddings cluster by expert group, morphology drives a latent severity (so
 the regressor has signal), and `local` defects get their severity via a real
 `MERGE`. The honesty flag is automatic: every seeded row carries
@@ -85,7 +85,7 @@ the regressor has signal), and `local` defects get their severity via a real
 databricks bundle deploy -t dev
 ```
 `dev` mode auto-pauses schedules and prefixes everything with your username, so
-nothing runs unattended. Open **Workflows** in the UI — the three jobs appear.
+nothing runs unattended. Open **Workflows** in the UI — the six jobs appear.
 
 ## 6. Run the daily pipeline → screenshot #1
 ```bash
@@ -96,47 +96,52 @@ Open the run in **Workflows → steeldefect-obt-daily → the run** and screensh
 optimize_obt). → **figure 1**.
 
 ## 7. MLflow → screenshot #2
-Run the A/B step with two model versions (after you've logged an incumbent and a
-challenger), or open the experiment created by `ab_decision`. In **Experiments**,
-open the A/B run and the **Models** registry page (versions + stage). Screenshot
-the comparison + the registered versions. → **figure 2**.
+Run `databricks bundle run steeldefect_ab -t dev`. Its `nb_ab.py` registers two
+segmenter versions and sets the `champion` / `challenger` aliases; it logs no accuracy
+and runs no A/B test. In **Models**, screenshot the registered versions and their
+aliases. → **figure 2**.
 
 ## 8. Delta history → screenshot #3
 In a SQL cell or notebook:
 ```sql
 DESCRIBE HISTORY steeldefect.obt_segmentations;
 ```
-Screenshot the operations column (`STREAMING UPDATE`, `MERGE`, `OPTIMIZE`). This
-demonstrates idempotent writes + the Z-ORDER maintenance pass are real. → **figure 3**.
+Screenshot the operations column (`WRITE`, `MERGE`, `OPTIMIZE`). This shows that the
+severity `MERGE` and the Z-ORDER maintenance pass are real; the stand-in ingest is a
+plain append, so it does not demonstrate idempotent ingestion. → **figure 3**.
 
-## 9. Put them in the report
-Save the three PNGs into `tn-report/template_tex/figures/` (e.g.
-`db_jobs_graph.png`, `db_mlflow_ab.png`, `db_delta_history.png`) and add a figure
-block in the platform appendix next to Table `tab:steeldefect:evidence`, captioned
-"Plateforme déployée sur Azure Databricks (données synthétiques calibrées) :
-graphe de Jobs, registre MLflow, et historique Delta." That single figure turns
-the evidence table from *traceable* into *demonstrated*.
+## 9. Keep the screenshots
+Keep the three PNGs with the deployment notes, captioned as a deployment on
+calibrated-synthetic data (Jobs graph, MLflow registry, Delta history), not as
+production results.
 
 ---
 
 ## Caveats (keep it honest)
 - **Data is synthetic.** The screenshots prove the platform *runs and is
-  deployable*, not any production metric. Keep the §"Limites" framing.
-- **Free Edition is serverless-only.** If you use Path B, remove the
-  `job_clusters:` blocks and the per-task `job_cluster_key: steeldefect` lines, and add
-  at job level:
-  ```yaml
-      # serverless: no job_clusters; tasks run on serverless compute
-  ```
-  (On Azure Path A, leave the bundle as written.)
+  deployable*, not any production metric. Say so wherever the screenshots are shown.
+- **The seed, A/B and daily OBT jobs run stand-in notebooks.** On the serverless
+  workspace used, reading workspace `.py` files failed with
+  `409 BlobCustomerSpecifiedEncryptionMismatch`, so the 7 tasks of these jobs run
+  simplified, self-contained notebooks (`seed_notebook.py`, `nb_*.py`): for example a
+  least-squares severity model with a fixed band instead of XGBoost + CQR, an append
+  of a fixed synthetic batch instead of a `MERGE` at ingest, and a registry step with
+  no A/B test. The AL, regroup and SSL jobs call the tested package through
+  `steeldefect_platform/run_task.py`, which also imports workspace `.py` files, so
+  they are exposed to the same error on that workspace.
 - **`segmenter_train` / `online_regroup`** are intentionally not in the bundle
   (external GPU training; continuous streaming) — documented in `databricks.yml`.
-- **State files**: add `.databricks/` and `*.tfstate*` to `.gitignore` — the
-  bundle writes local deploy state you don't want to commit.
+- **State files**: `.gitignore` already excludes `.databricks/` and `*.tfstate*`, the
+  local deploy state the bundle writes.
 
 ---
 
 ## Operations (observe · respond · recover)
+
+The data-quality gate, dead-letter table, dispatcher traceback and idempotent `MERGE`
+below belong to the tested package (`steeldefect_platform/ingestion.py`,
+`run_task.py`). The bundle's stand-in daily job has none of them: its `nb_ingest.py`
+appends a fixed synthetic batch, so re-running it duplicates rows.
 
 ### SLOs & what to monitor
 | Signal | Target / SLO | Where |
@@ -161,11 +166,15 @@ tasks auto-retry (`max_retries: 2`). The ingestion **data-quality gate** fails l
 
 ### Rollback
 - **Model**: re-point the alias to the previous version —
-  `MlflowClient().set_registered_model_alias("steeldefect_segmenter", "champion", <prev>)`
-  (the A/B gate's `keep_A` is the *forward* safeguard; this is the *backward* one).
-- **Data**: Delta time-travel — `RESTORE TABLE steeldefect.obt_segmentations TO VERSION AS OF <n>`
-  (history is retained 30 days).
-- **Deployment**: redeploy the previous bundle revision — `databricks bundle deploy -t prod`
-  from the prior commit; jobs/clusters are declarative, so the rollback is the diff.
+  `MlflowClient().set_registered_model_alias("main.steeldefect.steeldefect_segmenter", "champion", <prev>)`
+  (in the package, the A/B gate's `keep_A` is the *forward* safeguard; this is the
+  *backward* one).
+- **Data**: Delta time-travel — `RESTORE TABLE steeldefect.obt_segmentations TO VERSION AS OF <n>`,
+  possible while that version's data files survive `VACUUM` (7 days by default; the
+  log keeps 30 days).
+- **Deployment**: redeploy the previous bundle revision —
+  `databricks bundle deploy -t prod --var="service_principal=<application-id>"` from the
+  prior commit; the jobs are declarative (serverless, no clusters), so the rollback is
+  the diff.
 
 ```

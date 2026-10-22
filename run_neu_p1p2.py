@@ -2,15 +2,17 @@
 REAL public NEU-DET dataset, reusing the existing pipeline functions on precomputed
 real features. Honest provenance: source_version='neu-det-v1' (public, NOT plant data).
 
-  CNN embedding : torchvision EfficientNet-B0 (ImageNet), GAP + L2  -> mirrors the inspection CNN
-  Morphology    : 24/48 regionprops+Hu+GLCM (defect_clustering.features) on Otsu masks
+  CNN embedding : torchvision EfficientNet-B0 (ImageNet), GAP + L2, 1280-d  -> stands in for the inspection CNN
+  Morphology    : 24 regionprops+Hu+GLCM descriptors (defect_clustering.features) of the Otsu
+                  foreground; aggregation='mean_max' returns 48 columns, but the 0/255 mask is
+                  read as one labelled region, so mean == max (24 distinct values; a known bug)
   P2 (H2)       : defect_clustering.analysis.group_analysis.run_ablation (cnn vs fusion)
   P1 (H1)       : steeldefect_active_learning.active_learning.budget_curve.* (savings curve)
 
 Outputs (isolated, synthetic untouched):
   defect_clustering/outputs_neu/{ablation_results.csv, cluster_metrics.json}
   steeldefect_active_learning/outputs_neu/{al_budget_savings.json, al_budget_curve.csv}
-  outputs_neu_p1p2_summary.json
+  outputs_neu_p1p2_summary.json  (tracked; includes the per-budget AL curve as P1_curve)
 """
 from __future__ import annotations
 import json, os, sys
@@ -77,6 +79,17 @@ def morphology(paths, cache=os.path.join(DC_OUT, "neu_morph.npy")):
     return X
 
 
+def budget_curve_summary(df):
+    """Mean and standard deviation of macro-F1 per strategy and budget, over the seeds."""
+    budgets = sorted(int(b) for b in df["budget"].unique())
+    strategies = sorted(df["strategy"].unique())
+    stats = df.groupby(["strategy", "budget"])["macro_f1"].agg(["mean", "std"])
+    return {"source_version": SRC, "metric": "macro_f1", "n_seeds": int(df["seed"].nunique()),
+            "budgets": budgets,
+            "mean": {s: [round(float(stats.loc[(s, b), "mean"]), 4) for b in budgets] for s in strategies},
+            "std": {s: [round(float(stats.loc[(s, b), "std"]), 4) for b in budgets] for s in strategies}}
+
+
 def main():
     classes, paths, y = list_data()
     print(f"NEU-DET: {len(paths)} images, {len(classes)} classes {classes}")
@@ -112,14 +125,16 @@ def main():
     sav["source_version"] = SRC
     json.dump(sav, open(os.path.join(AL_OUT, "al_budget_savings.json"), "w"), indent=2)
     print("  savings:", json.dumps(sav))
+    curve = budget_curve_summary(df)
 
     summary = {"source_version": SRC, "dataset": "NEU-DET (public)", "classes": classes,
-               "P2_H2": cluster_metrics, "P1_H1": sav}
+               "P2_H2": cluster_metrics, "P1_H1": sav, "P1_curve": curve}
     json.dump(summary, open("outputs_neu_p1p2_summary.json", "w"), indent=2)
     print("\n=== SUMMARY ===")
     print(f"  P2/H2: CNN-only NMI {cnn_nmi:.3f} -> fusion {fus['nmi']:.3f} "
-          f"(Δ{fus['delta_nmi_vs_cnn']:+.3f}), H2_pass={h2}")
-    print(f"  P1/H1: typiclust@{sav['ref_budget']} matches random@{sav.get('baseline_budget_to_match')} "
+          f"(delta {fus['delta_nmi_vs_cnn']:+.3f}), H2_pass={h2}")
+    print(f"  P1/H1: random reaches the macro-F1 of typiclust@{sav['ref_budget']} "
+          f"({sav.get('target_macro_f1')}) at {sav.get('baseline_budget_to_match')} labels "
           f"-> savings x{sav.get('savings_ratio')}")
 
 

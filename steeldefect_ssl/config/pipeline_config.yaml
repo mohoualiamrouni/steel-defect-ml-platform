@@ -1,8 +1,8 @@
 # =============================================================================
 # steeldefect_ssl (P4) — default configuration
-# Self-supervised foundation model + open-set novelty + continual learning (CPU).
+# Self-supervised encoder + open-set novelty + continual learning (CPU).
 # Bare run is a SMOKE run (runtime.fast_mode: true, ~4-5 min). Pass --full on the
-# CLI to flip fast_mode off for the ~20-25 min best-results run.
+# CLI to flip fast_mode off for the full run (about 4.6 h on the CPU used).
 # =============================================================================
 
 data:

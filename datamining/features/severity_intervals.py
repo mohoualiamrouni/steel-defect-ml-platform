@@ -24,8 +24,8 @@ Public API
 
 The base point estimator is unchanged -- existing
 :func:`severity_model.train_severity_model` callers see no behavioural
-difference unless they explicitly opt-in via the ``use_cqr`` config flag
-in :mod:`pipeline.run_pipeline`.
+difference; :mod:`pipeline.run_pipeline` adds the intervals when the ``use_cqr``
+config flag is on, which it is by default.
 """
 from __future__ import annotations
 

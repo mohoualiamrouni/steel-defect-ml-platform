@@ -35,9 +35,9 @@ from typing import Any, Dict, List, Optional
 
 OBT_TABLE: str = "steeldefect.obt_segmentations"
 
-#: Inspection CNN embedding dimension (EfficientNet-B0 GAP+L2). Matches
-#: ``defect_clustering.data.generate_synthetic_data`` (cnn_dim=960) and the
-#: report ("960-D").
+#: Embedding dimension of the in-line inspection CNN (960-D, as in the report).
+#: Matches ``defect_clustering.data.generate_synthetic_data`` (cnn_dim=960). The
+#: public NEU-DET run uses an ImageNet EfficientNet-B0 instead (GAP + L2, 1280-D).
 CNN_DIM: int = 960
 
 #: The 24 per-region morphology descriptors, in EXACTLY the order produced by
