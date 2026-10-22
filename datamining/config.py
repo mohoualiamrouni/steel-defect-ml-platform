@@ -40,7 +40,7 @@ class DataminingConfig:
     # ``use_optuna=False``.  In the nominal pipeline (use_optuna=True) the TPE
     # study in ``optuna_tune`` (50 trials, 3-fold RMSE) OVERWRITES them with the
     # tuned hyper-parameters reported in the thesis (≈131 trees, depth 4,
-    # learning_rate≈0.011).  Do not mistake these defaults for the production
+    # learning_rate≈0.011).  Do not mistake these defaults for the tuned
     # model's hyper-parameters — see report tab:xgb_hparams.
     xgb_n_estimators: int = 200
     xgb_max_depth: int = 6
@@ -73,7 +73,7 @@ class DataminingConfig:
 
     # -- Conformalised Quantile Regression (Romano, Patterson, Candès 2019) ---
     # Adds severity_lo / severity_hi columns with finite-sample-valid coverage
-    # at level (1 - cqr_alpha).  ENABLED in production: the calibration split is
+    # at level (1 - cqr_alpha).  Enabled by default: the calibration split is
     # coil-disjoint (GroupShuffleSplit on coil_id) so the reported coverage is
     # honest.  ``grade_by`` selects how intervals feed the cutting decision:
     #   "mean"     — grade on the point severity (baseline);

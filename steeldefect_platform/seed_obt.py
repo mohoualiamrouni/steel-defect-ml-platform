@@ -21,7 +21,7 @@ realistic lifecycle::
 
 Run on Databricks (notebook)::
 
-    import sys; sys.path.insert(0, "/Workspace/Repos/<you>/the plant")
+    import sys; sys.path.insert(0, "/Workspace/Repos/<you>/steel-defect-ml-platform")
     from steeldefect_platform.seed_obt import seed
     summary = seed(spark, n_coils=40, with_mlflow=True)
 

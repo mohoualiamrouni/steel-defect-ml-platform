@@ -1,9 +1,11 @@
 """Inspection → OBT ingestion (batch + structured streaming).
 
-An on-prem edge job at the plant runs the inspection segmenter and pushes only
-segmentation *summaries* (keys, label, 960-d vector, 24 morphology features,
-position/density, ADLS URIs) into a Delta landing table
-``steeldefect_landing.segmentations``.  The raw images never leave the plant.
+In the target deployment, an on-prem edge job at the plant runs the inspection
+segmenter and pushes only segmentation *summaries* (keys, label, 960-d vector, 24
+morphology features, position/density, ADLS URIs) into a Delta landing table
+``steeldefect_landing.segmentations``, so the raw images never leave the plant.
+This repository has no plant feed: its demos and seed jobs use calibrated-synthetic
+rows (``source_version = "synthetic-cal-v1"``).
 
 This module lands those summaries into ``steeldefect.obt_segmentations`` using the
 same ``applyInPandas`` UDF + ``sys.path``/``STEELDEFECT_WORKSPACE_ROOT`` idiom as

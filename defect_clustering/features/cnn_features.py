@@ -39,7 +39,8 @@ def load_cnn_features(pickle_path: str) -> Tuple[np.ndarray, List[str]]:
     -------
     features : np.ndarray
         ``(N, D)`` float32 array where *D* is the feature dimension
-        (typically 960 for EfficientNet-B0).
+        (960 for the inspection CNN embedding; 1280 for the ImageNet
+        EfficientNet-B0 used on NEU-DET).
     image_ids : List[str]
         List of *N* image identifiers in the same row order as *features*.
 
