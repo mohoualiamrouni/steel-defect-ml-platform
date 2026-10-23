@@ -98,7 +98,7 @@ def main():
     K = len(classes)
 
     # ---- P2: clustering + CNN/morphology fusion ablation (H2) ----
-    from defect_clustering.analysis.group_analysis import run_ablation
+    from defect_clustering.analysis.group_analysis import h2_verdict, run_ablation
     print("\n[P2] fusion ablation (CNN vs morphology vs fusion) ...")
     abl = run_ablation(cnn_features=X_cnn, seg_features=X_morph, labels_expert=y,
                        k=K, random_state=42, n_bootstrap=100)
@@ -106,7 +106,7 @@ def main():
     print(abl.to_string(index=False))
     row = {r["feature_set"]: r for _, r in abl.iterrows()}
     cnn_nmi = float(row["cnn_only"]["nmi"]); fus = row["fusion_block_pca"]
-    h2 = bool(fus["nmi_ci_low"] > cnn_nmi and fus["delta_nmi_vs_cnn"] >= 0.03)
+    h2 = h2_verdict(abl)["passed"]
     cluster_metrics = {"source_version": SRC, "n_samples": len(y), "n_clusters": K,
                        "cnn_only_nmi": cnn_nmi, "fusion_nmi": float(fus["nmi"]),
                        "fusion_nmi_ci": [float(fus["nmi_ci_low"]), float(fus["nmi_ci_high"])],

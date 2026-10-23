@@ -2,14 +2,15 @@
 
 Run from the repo root:  python make_headline_figures.py
 
-Reads the CSV/JSON artifacts each pipeline writes and produces clean,
-report-ready figures (French labels) into each pipeline's outputs/plots/.
+Reads the CSV/JSON artifacts each pipeline writes and produces clean figures
+(English labels) into each pipeline's outputs/plots/. Every verdict shown on a
+figure is computed from the artifact it plots, never written by hand.
 Re-runnable: it only reads artifacts, never re-trains.
 
 Headline set
 ------------
-Active Learning + A/B  : al_budget_curve (pre-existing) · ab_promotion_gate · ab_per_class_delta
-Defect clustering      : h2_ablation · group_confusion_heatmap · regrouping_merges
+Active Learning + A/B  : al_budget_curve · ab_promotion_gate · ab_per_class_delta
+Defect clustering      : h2_ablation · group_confusion_heatmap · regrouping_families
 Datamining + cutting   : h3_grades · yield_distribution · shap_bar (pre-existing)
 """
 from __future__ import annotations
@@ -23,6 +24,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from defect_clustering.analysis.group_analysis import h2_verdict
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 GREEN, RED, BLUE, GREY = "#2e8b57", "#c0392b", "#2c6fbb", "#7f8c8d"
 
@@ -34,6 +37,13 @@ def _save(fig, path):
     print(f"  wrote {path}")
 
 
+def _verdict_word(flag) -> str:
+    """'met', 'not met', or 'n/a' when the artifact carries no verdict."""
+    if flag is None:
+        return "n/a"
+    return "met" if flag else "not met"
+
+
 # ===========================================================================
 # 1) Active Learning + A/B
 # ===========================================================================
@@ -42,6 +52,17 @@ def al_ab_figures():
     plots = os.path.join(base, "plots")
     os.makedirs(plots, exist_ok=True)
     print("[AL + A/B]")
+
+    # --- al_budget_curve : mean macro-F1 with a Student-t 95% band ----------
+    curve_p = os.path.join(base, "al_budget_curve.csv")
+    if os.path.exists(curve_p):
+        from steeldefect_active_learning.active_learning.budget_curve import plot_budget_curve
+        sav_p = os.path.join(base, "al_budget_savings.json")
+        sav = json.load(open(sav_p)) if os.path.exists(sav_p) else None
+        out = os.path.join(plots, "al_budget_curve.png")
+        plot_budget_curve(pd.read_csv(curve_p), out, savings=sav,
+                          data_label="calibrated-synthetic data")
+        print(f"  wrote {out}")
 
     # --- ab_promotion_gate : the decision card -----------------------------
     dec_p = os.path.join(base, "ab_decision.json")
@@ -56,7 +77,7 @@ def al_ab_figures():
         ax.axis("off")
         verdict = dec.get("decision", "?")
         vcol = GREEN if verdict == "promote_B" else RED
-        ax.text(0.5, 0.96, f"Porte de promotion A/B — décision : {verdict.upper()}",
+        ax.text(0.5, 0.96, f"A/B promotion gate (synthetic demo predictions): decision {verdict.upper()}",
                 ha="center", va="top", fontsize=13, fontweight="bold", color=vcol,
                 transform=ax.transAxes)
         y = 0.84
@@ -78,7 +99,7 @@ def al_ab_figures():
         _save(fig, os.path.join(plots, "ab_promotion_gate.png"))
 
     # --- ab_per_class_delta : per-class accuracy B - A ---------------------
-    demo_p = os.path.join(base.replace("outputs", "data"), "demo_ab_predictions.csv")
+    demo_p = os.path.join(os.path.dirname(base), "data", "demo_ab_predictions.csv")
     if os.path.exists(demo_p):
         df = pd.read_csv(demo_p)
         rows = []
@@ -94,9 +115,9 @@ def al_ab_figures():
         fig, ax = plt.subplots(figsize=(7.6, 4.4))
         ax.barh(names, delta, color=cols)
         ax.axvline(0, color="black", lw=0.8)
-        ax.set_xlabel("Δ exactitude par classe  (modèle B − modèle A)")
-        ax.set_title("A/B — gain/perte d'exactitude par classe\n"
-                     "(bleu = 3 classes ré-entraînées de B)")
+        ax.set_xlabel("Per-class accuracy change (model B - model A)")
+        ax.set_title("A/B: per-class accuracy change on synthetic predictions\n"
+                     "(blue = the 3 classes where the simulated B is set to beat A)")
         ax.grid(axis="x", alpha=0.3)
         _save(fig, os.path.join(plots, "ab_per_class_delta.png"))
 
@@ -104,50 +125,76 @@ def al_ab_figures():
 # ===========================================================================
 # 2) Defect clustering
 # ===========================================================================
-def defect_figures():
-    base = os.path.join(ROOT, "defect_clustering", "outputs")
+def defect_figures(base: str | None = None, data_label: str = "calibrated-synthetic data"):
+    """Defect-clustering figures from the artifacts in ``base``.
+
+    ``base`` defaults to ``defect_clustering/outputs`` (the calibrated-synthetic
+    run); pass ``defect_clustering/outputs_neu`` with ``data_label="NEU-DET"``
+    for the public-data run.
+    """
+    base = base or os.path.join(ROOT, "defect_clustering", "outputs")
     plots = os.path.join(base, "plots")
     os.makedirs(plots, exist_ok=True)
     print("[Defect clustering]")
 
     # --- h2_ablation : NMI per feature set with bootstrap CI ---------------
     abl_p = os.path.join(base, "ablation_results.csv")
-    if os.path.exists(abl_p):
-        a = pd.read_csv(abl_p).set_index("feature_set")
+    raw = pd.read_csv(abl_p) if os.path.exists(abl_p) else None
+    verdict = None
+    if raw is not None:
+        try:
+            verdict = h2_verdict(raw)
+        except (KeyError, ValueError) as exc:  # e.g. a CNN-only run has no fusion row
+            print(f"  skip h2_ablation: no H2 verdict in {abl_p} ({exc})")
+    if verdict is not None:
+        a = raw.set_index("feature_set")
         order = [r for r in ["cnn_only", "seg_only", "concat_naive",
                              "fusion_block_pca", "weighted_08_02"] if r in a.index]
         a = a.loc[order]
         nmi = a["nmi"].values
-        lo = a.get("nmi_ci_low", a["nmi"]).values
-        hi = a.get("nmi_ci_high", a["nmi"]).values
-        err = np.vstack([np.maximum(nmi - lo, 0), np.maximum(hi - nmi, 0)])
-        labels = {"cnn_only": "CNN seul\n(960→ACP-50)", "seg_only": "DefChars seul\n(48-D)",
-                  "concat_naive": "Concat. naïve\n(sans ACP)",
-                  "fusion_block_pca": "Fusion z-score\n+ ACP (prod.)",
-                  "weighted_08_02": "Pondérée 0.8/0.2"}
-        cols = [GREY, GREY, "#d4a017", GREEN, BLUE][:len(order)]
+        lo = a["nmi_ci_low"].values
+        hi = a["nmi_ci_high"].values
+        # Without a CI (n_bootstrap=0) the rule fails closed, but no test was run.
+        flag = verdict["passed"] if np.isfinite(verdict["fusion_nmi_ci"][0]) else None
+        vcol = GREY if flag is None else (GREEN if flag else RED)
+        bar_color = {"cnn_only": GREY, "seg_only": GREY, "concat_naive": "#d4a017",
+                     "fusion_block_pca": vcol, "weighted_08_02": BLUE}
+        cols = [bar_color.get(o, GREY) for o in order]
+        n_pca = int(a.loc["cnn_only", "n_features"]) if "n_features" in a.columns else None
+        labels = {"cnn_only": f"CNN only\n(PCA-{n_pca})" if n_pca else "CNN only",
+                  "seg_only": "Morphology only",
+                  "concat_naive": "Naive concat.\n(no PCA)",
+                  "fusion_block_pca": "Fusion z-score\n+ PCA (H2 test)",
+                  "weighted_08_02": "Weighted 0.8/0.2"}
         fig, ax = plt.subplots(figsize=(7.8, 4.6))
         x = np.arange(len(order))
-        ax.bar(x, nmi, yerr=err, color=cols, capsize=4)
+        ax.bar(x, nmi, color=cols)
+        # Draw each CI as computed: a percentile CI need not contain the point estimate.
+        ax.errorbar(x, (lo + hi) / 2, yerr=(hi - lo) / 2, fmt="none", ecolor="black", capsize=4)
         ax.set_xticks(x)
         ax.set_xticklabels([labels.get(o, o) for o in order], fontsize=8.5)
-        ax.set_ylabel("NMI vs 28 groupes experts")
-        base_nmi = a.loc["cnn_only", "nmi"] if "cnn_only" in a.index else nmi[0]
-        ax.set_ylim(0, 0.95)
-        if "fusion_block_pca" in a.index:
-            fu = a.loc["fusion_block_pca", "nmi"]
-            fi = order.index("fusion_block_pca")
-            ax.annotate(f"+{fu - base_nmi:.3f} NMI\n(H2 validée, IC exclut 0)",
-                        xy=(fi, fu), xytext=(fi - 1.7, 0.52),
-                        fontsize=9.5, color=GREEN, fontweight="bold", ha="center",
-                        arrowprops=dict(arrowstyle="->", color=GREEN, lw=1.4),
-                        bbox=dict(boxstyle="round", fc="white", ec=GREEN, alpha=0.9))
+        ax.set_ylabel("NMI against the reference labels")
+        base_nmi = verdict["cnn_nmi"]
+        ax.set_ylim(0, 1.0)
+        fi = order.index("fusion_block_pca")
+        rule = (f"fusion CI low {verdict['fusion_nmi_ci'][0]:.4f} vs CNN-only {base_nmi:.4f}; "
+                f"gain {verdict['delta_nmi']:+.4f} vs {verdict['min_gain']:.2f}")
+        ax.annotate(f"{verdict['delta_nmi']:+.4f} NMI\nH2 {_verdict_word(flag)}",
+                    xy=(fi, verdict["fusion_nmi"]), xytext=(fi - 1.85, 0.53),
+                    fontsize=9.5, color=vcol, fontweight="bold", ha="center",
+                    arrowprops=dict(arrowstyle="->", color="black", lw=1.2),
+                    bbox=dict(boxstyle="round", fc="white", ec=vcol, alpha=0.9))
         ax.axhline(base_nmi, ls="--", color=GREY, lw=0.9)
-        ax.set_title("H2 — apport des descripteurs morphologiques\n(ablation, IC bootstrap B=100)")
+        ax.set_title(f"H2: do morphology descriptors add NMI? ({data_label})\n"
+                     "95% percentile bootstrap CI of each NMI, clustering fixed")
+        ax.text(0.5, -0.27, "H2 rule: fusion CI lower bound > CNN-only NMI and gain >= "
+                f"{verdict['min_gain']:.2f}. Here: {rule}.\n"
+                "One clustering seed: variation across seeds is not part of the CI.",
+                transform=ax.transAxes, ha="center", fontsize=7, color="black")
         ax.grid(axis="y", alpha=0.3)
         _save(fig, os.path.join(plots, "h2_ablation.png"))
 
-    # --- group_confusion_heatmap : 28×28 reordered by proposed family ------
+    # --- group_confusion_heatmap : group x group, ordered by proposed family -
     conf_p = os.path.join(base, "group_confusion.csv")
     remap_p = os.path.join(base, "group_remap.json")
     if os.path.exists(conf_p) and os.path.exists(remap_p):
@@ -161,18 +208,19 @@ def defect_figures():
         ax.set_xticks(range(len(order))); ax.set_yticks(range(len(order)))
         ax.set_xticklabels(order, rotation=90, fontsize=6)
         ax.set_yticklabels(order, fontsize=6)
-        ax.set_title("Matrice de co-clustering des 28 groupes experts\n"
-                     "(réordonnée par famille métallurgique proposée)")
-        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="affinité")
+        ax.set_title(f"Co-clustering matrix of the {len(order)} expert groups ({data_label})\n"
+                     "(ordered by proposed family)")
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04,
+                     label="share of the row group's samples in clusters led by the column group")
         _save(fig, os.path.join(plots, "group_confusion_heatmap.png"))
 
-    # --- regrouping_families : the 28 -> K consolidation (composition) -----
+    # --- regrouping_families : expert groups -> K families (composition) ----
     # Replaces the flat affinity bar (whose uniform ~0.5 was an artifact of
     # symmetric averaging over asymmetric absorptions). This shows the actual
-    # deliverable: which expert groups consolidate into which metallurgical
-    # family, sized by sample count — so both the consolidation AND the class
-    # imbalance are visible, with naturally varied bar lengths.
-    meta_p = os.path.join(base.replace("outputs", "data"), "synthetic", "metadata.csv")
+    # deliverable: which expert groups consolidate into which family, sized by
+    # sample count, so both the consolidation AND the class imbalance are
+    # visible, with naturally varied bar lengths.
+    meta_p = os.path.join(os.path.dirname(base), "data", "synthetic", "metadata.csv")
     if os.path.exists(remap_p) and os.path.exists(meta_p):
         gmap = json.load(open(remap_p)).get("group_map", {})
         kp = json.load(open(remap_p)).get("k_proposed", len(set(gmap.values())))
@@ -191,12 +239,12 @@ def defect_figures():
         bars = ax.barh(fams, sizes, color=cols)
         for bar, members, ng in zip(bars, [m for _, m in fam_items], ngroups):
             names = ", ".join(g for g, _ in sorted(members, key=lambda x: -x[1]))
-            tag = f"  {ng} groupe{'s' if ng > 1 else ''} : {names}"
+            tag = f"  {ng} group{'s' if ng > 1 else ''}: {names}"
             ax.text(bar.get_width(), bar.get_y() + bar.get_height() / 2,
                     tag[:78], va="center", fontsize=7, color="black")
-        ax.set_xlabel("nombre d'échantillons (taille de la famille)")
-        ax.set_title(f"Re-groupement métallurgique : 28 groupes experts → {kp} familles\n"
-                     f"(vert = famille fusionnée, gris = groupe conservé seul)")
+        ax.set_xlabel("number of samples (family size)")
+        ax.set_title(f"Regrouping: {len(gmap)} expert groups -> {kp} families ({data_label})\n"
+                     "(green = merged family, grey = group kept alone)")
         ax.margins(x=0.28)
         ax.grid(axis="x", alpha=0.3)
         _save(fig, os.path.join(plots, "regrouping_families.png"))
@@ -238,34 +286,34 @@ def datamining_figures():
                      fontsize=9, color="white", fontweight="bold")
         bottom += m
     ax1.axhline(0.25, ls="--", color="black", lw=1)
-    ax1.text(0.35, 0.25, "seuil grade A ≥ 25 %", fontsize=8, va="bottom")
+    ax1.text(0.35, 0.25, "grade A threshold >= 25%", fontsize=8, va="bottom")
     ax1.set_xlim(-0.6, 1.2); ax1.set_xticks([])
-    ax1.set_ylabel("fraction de surface (pondérée par l'aire)")
+    ax1.set_ylabel("surface fraction (area-weighted)")
     h3a = h3.get("H3a_pass_grade_A_ge_0.25"); h3b = h3.get("H3b_pass_scrap_le_0.05")
-    ax1.set_title(f"H3 — répartition moyenne des grades\n"
-                  f"H3a (A≥25%): {'OK' if h3a else 'NON'} · "
-                  f"H3b (rebut≤5%): {'OK' if h3b else 'NON'}")
+    ax1.set_title(f"H3: mean grade split (calibrated-synthetic coils)\n"
+                  f"H3a (A >= 25%): {_verdict_word(h3a)} · "
+                  f"H3b (scrap <= 5%): {_verdict_word(h3b)}")
     ax1.legend(fontsize=8, loc="upper right")
 
     sc = df["area_frac_scrap"] * 100.0
     ax2.scatter(range(len(sc)), sorted(sc), s=18, color=RED, alpha=0.7)
-    ax2.axhline(5.0, ls="--", color="black", lw=1, label="plafond rebut 5 %")
-    ax2.set_xlabel("bobine (triée)"); ax2.set_ylabel("rebut (% surface)")
-    ax2.set_title(f"Rebut par bobine — {h3.get('n_coils_scrap_le_5pct','?')}/"
-                  f"{h3.get('n_coils','?')} bobines ≤ 5 %")
+    ax2.axhline(5.0, ls="--", color="black", lw=1, label="scrap ceiling 5%")
+    ax2.set_xlabel("coil (sorted)"); ax2.set_ylabel("scrap (% of surface)")
+    ax2.set_title(f"Scrap per coil: {h3.get('n_coils_scrap_le_5pct','?')}/"
+                  f"{h3.get('n_coils','?')} coils <= 5%")
     ax2.legend(fontsize=8); ax2.grid(alpha=0.3)
     _save(fig, os.path.join(plots, "h3_grades.png"))
 
-    # --- yield_distribution : realistic spread ------------------------------
+    # --- yield_distribution : spread across coils ---------------------------
     fig, ax = plt.subplots(figsize=(7.4, 4.2))
     ax.hist(df["yield_pct"], bins=12, color=BLUE, edgecolor="white", alpha=0.85)
     mu = df["yield_pct"].mean()
-    ax.axvline(mu, color=RED, lw=1.5, label=f"moyenne {mu:.1f}%")
-    ax.set_xlabel("rendement matière par bobine (%)")
-    ax.set_ylabel("nombre de bobines")
+    ax.axvline(mu, color=RED, lw=1.5, label=f"mean {mu:.1f}%")
+    ax.set_xlabel("material yield per coil (%)")
+    ax.set_ylabel("number of coils")
     r2 = met.get("severity_model_r2")
-    ax.set_title(f"Distribution du rendement matière sur {len(df)} bobines calibrées"
-                 + (f"  (modèle sévérité R²={r2:.3f})" if r2 else ""))
+    ax.set_title(f"Material yield over {len(df)} calibrated-synthetic coils"
+                 + (f"  (severity model R² = {r2:.3f})" if r2 else ""))
     ax.legend(); ax.grid(axis="y", alpha=0.3)
     _save(fig, os.path.join(plots, "yield_distribution.png"))
 
@@ -273,5 +321,8 @@ def datamining_figures():
 if __name__ == "__main__":
     al_ab_figures()
     defect_figures()
+    neu = os.path.join(ROOT, "defect_clustering", "outputs_neu")
+    if os.path.isdir(neu):  # the public-data run, if it was reproduced locally
+        defect_figures(base=neu, data_label="NEU-DET")
     datamining_figures()
     print("\nDone. Headline figures written to each <pipeline>/outputs/plots/.")

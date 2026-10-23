@@ -567,7 +567,7 @@ def run_ablation(
     * ``fusion_block_pca`` — ``fuse_features(concat_scale, pca_variance)``  ← H2 test
     * ``weighted_08_02``   — ``fuse_features(cnn_w=0.8, seg_w=0.2, pca)``
 
-    H2 verdict (computed by the caller from this table): PASSED iff
+    H2 verdict: :func:`h2_verdict` applies the rule to this table, PASSED iff
     ``fusion_block_pca.nmi_ci_low > cnn_only.nmi`` **and**
     ``delta_nmi_vs_cnn >= 0.03``.
 
@@ -656,3 +656,44 @@ def run_ablation(
     for col in ("nmi", "nmi_ci_low", "nmi_ci_high", "ari", "silhouette"):
         df[col] = df[col].round(4)
     return df
+
+
+#: Minimum NMI gain of the fusion over CNN-only for H2 to pass.
+H2_MIN_GAIN: float = 0.03
+
+
+def h2_verdict(ablation: pd.DataFrame, min_gain: float = H2_MIN_GAIN) -> Dict[str, Any]:
+    """Apply the H2 decision rule to a :func:`run_ablation` table.
+
+    H2 passes iff the lower bound of the ``fusion_block_pca`` NMI bootstrap CI
+    is above the ``cnn_only`` NMI **and** the gain ``delta_nmi_vs_cnn`` is at
+    least ``min_gain``.  The CI is the percentile bootstrap of the fusion NMI
+    with the clustering fixed (:func:`_bootstrap_nmi_ci`), compared with the
+    CNN-only point estimate: it is not a paired test of the difference.  A
+    missing CI (``n_bootstrap=0`` gives NaN) fails the rule.
+
+    Returns the inputs of the decision, the two sub-criteria and ``passed``.
+    Raises ``ValueError`` if the ``cnn_only`` or ``fusion_block_pca`` row is
+    missing (a CNN-only ablation has no fusion row), and ``KeyError`` if a
+    needed column is missing.
+    """
+    rows = ablation.set_index("feature_set") if "feature_set" in ablation.columns else ablation
+    missing = [r for r in ("cnn_only", "fusion_block_pca") if r not in rows.index]
+    if missing:
+        raise ValueError(f"ablation table lacks the rows {missing}")
+    cnn_nmi = float(rows.loc["cnn_only", "nmi"])
+    fusion = rows.loc["fusion_block_pca"]
+    ci_low, ci_high = float(fusion["nmi_ci_low"]), float(fusion["nmi_ci_high"])
+    gain = float(fusion["delta_nmi_vs_cnn"])
+    ci_low_above_cnn = bool(ci_low > cnn_nmi)
+    gain_ok = bool(gain >= min_gain)
+    return {
+        "cnn_nmi": cnn_nmi,
+        "fusion_nmi": float(fusion["nmi"]),
+        "fusion_nmi_ci": [ci_low, ci_high],
+        "delta_nmi": gain,
+        "min_gain": min_gain,
+        "ci_low_above_cnn": ci_low_above_cnn,
+        "gain_ok": gain_ok,
+        "passed": ci_low_above_cnn and gain_ok,
+    }
