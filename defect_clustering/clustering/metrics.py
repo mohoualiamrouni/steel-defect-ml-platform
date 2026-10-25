@@ -417,7 +417,7 @@ def plot_2d_projection(
     ):
         unique_lbl = sorted(set(lbl))
         n_colors = max(len(unique_lbl), 6)
-        cmap = plt.cm.get_cmap("tab10" if n_colors <= 10 else "tab20", n_colors)
+        cmap = matplotlib.colormaps["tab10" if n_colors <= 10 else "tab20"].resampled(n_colors)
         for i, uid in enumerate(unique_lbl):
             mask = lbl == uid
             ax.scatter(

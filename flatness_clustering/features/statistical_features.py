@@ -111,6 +111,20 @@ N_FEATURES_TOTAL = (
 )  # 1105 (30 + 50 + 15 + 10 + 1000)
 
 
+def feature_group_slices() -> List[tuple]:
+    """(group letter, column slice) of the groups A to E, in column order.
+
+    The single source of the column layout for code that reads features by
+    group (plots and reports), so it cannot drift from the extractor.
+    """
+    out, start = [], 0
+    for group, n in (("A", N_FEATURES_A), ("B", N_FEATURES_B), ("C", N_FEATURES_C),
+                     ("D", N_FEATURES_D), ("E", N_FEATURES_E)):
+        out.append((group, slice(start, start + n)))
+        start += n
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------

@@ -35,6 +35,8 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
+from flatness_clustering.features.statistical_features import feature_group_slices
+
 
 # ---------------------------------------------------------------------------
 # Shared constants
@@ -45,18 +47,15 @@ _DARK   = "#212121"
 _GREY   = "#546E7A"
 _DPI    = 150
 
-# Feature group slices (must match statistical_features.py)
-_GROUPS = [
-    ("Group A\nZonal",    slice(0,   30)),
-    ("Group B\nSnapshot", slice(30,  80)),
-    ("Group C\nSpectral", slice(80,  95)),
-    ("Group D\nTemporal", slice(95,  105)),
-    ("Group E\nROCKET",   slice(105, 135)),
-]
+# Feature group slices, taken from the extractor so they follow its layout
+# (30 + 50 + 15 + 10 + 1000 = 1105 columns).
+_GROUP_NAMES = {"A": "Group A\nZonal", "B": "Group B\nSnapshot", "C": "Group C\nSpectral",
+                "D": "Group D\nTemporal", "E": "Group E\nROCKET"}
+_GROUPS = [(_GROUP_NAMES[g], cols) for g, cols in feature_group_slices()]
 
 
 def _cluster_colors(k: int) -> np.ndarray:
-    return plt.cm.get_cmap(_CMAP, max(k, 2))(np.linspace(0, 1, k))
+    return matplotlib.colormaps[_CMAP].resampled(max(k, 2))(np.linspace(0, 1, k))
 
 
 def _footer(fig) -> None:

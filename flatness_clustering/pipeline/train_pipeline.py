@@ -4,7 +4,8 @@ Flatness Clustering — Training Pipeline
 
 Orchestrates the full model-fitting workflow:
     1. Load all synthetic coil profiles via FlatnessDataset
-    2. Extract 505-dim statistical features (extract_batch) — incl. Group D temporal + Group E ROCKET (200 kernels)
+    2. Extract 1105-dim features (extract_batch): 105 statistical ones, including
+       Group D temporal, plus Group E ROCKET (500 kernels, 1000 features)
     3. Extract 50-dim spatial features for visualisation (SpatialFeatureExtractor)
     4. Fit CoilClusterer (KMeans by default)
     5. Compute quality metrics: silhouette + Davies-Bouldin + Calinski-Harabász

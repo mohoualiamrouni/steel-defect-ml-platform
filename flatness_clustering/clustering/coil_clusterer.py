@@ -47,7 +47,7 @@ Usage
     from flatness_clustering.clustering.coil_clusterer import CoilClusterer
 
     clusterer = CoilClusterer(method="kmeans", n_clusters=6)
-    clusterer.fit(feature_matrix)      # (N, 125) float32
+    clusterer.fit(feature_matrix)      # (N, 1105) float32
 
     cluster_id = clusterer.predict(new_feature)      # int
     distances  = clusterer.distance_to_all_clusters(new_feature)  # (K,)

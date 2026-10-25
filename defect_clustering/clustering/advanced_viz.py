@@ -62,7 +62,7 @@ _GROUPS = [
 
 
 def _cluster_colors(k: int) -> np.ndarray:
-    return plt.cm.get_cmap(_CMAP, max(k, 2))(np.linspace(0, 1, k))
+    return matplotlib.colormaps[_CMAP].resampled(max(k, 2))(np.linspace(0, 1, k))
 
 
 def _footer(fig) -> None:
@@ -735,8 +735,8 @@ def plot_alluvial_diagram(
     right_pos = _compute_positions(right_sizes, gap_frac)
 
     # Colors: one distinct color per expert group
-    cmap_left = plt.cm.get_cmap("Set2", max(n_left, 3))
-    cmap_right = plt.cm.get_cmap("tab10", max(n_right, 3))
+    cmap_left = matplotlib.colormaps["Set2"].resampled(max(n_left, 3))
+    cmap_right = matplotlib.colormaps["tab10"].resampled(max(n_right, 3))
     left_colors = [cmap_left(i / max(n_left, 1)) for i in range(n_left)]
     right_colors = [cmap_right(i / max(n_right, 1)) for i in range(n_right)]
 
