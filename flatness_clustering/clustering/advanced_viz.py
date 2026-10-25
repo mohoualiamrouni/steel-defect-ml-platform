@@ -56,7 +56,7 @@ _GROUPS = [
 
 
 def _cluster_colors(k: int) -> np.ndarray:
-    return plt.cm.get_cmap(_CMAP, max(k, 2))(np.linspace(0, 1, k))
+    return matplotlib.colormaps[_CMAP].resampled(max(k, 2))(np.linspace(0, 1, k))
 
 
 def _footer(fig) -> None:

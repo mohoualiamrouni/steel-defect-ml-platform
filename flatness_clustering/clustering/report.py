@@ -162,7 +162,7 @@ _CLUSTER_CMAP = "tab10"
 
 
 def _cluster_colors(k: int):
-    return plt.cm.get_cmap(_CLUSTER_CMAP, max(k, 2))(np.linspace(0, 1, k))
+    return matplotlib.colormaps[_CLUSTER_CMAP].resampled(max(k, 2))(np.linspace(0, 1, k))
 
 
 def _header(fig, title: str, subtitle: str = "") -> None:
@@ -607,7 +607,7 @@ def _page_umap(pdf, features_sc, labels, metadata):
     emb = reducer.fit_transform(features_sc)
 
     k = len(set(labels))
-    cmap = plt.cm.get_cmap(_CLUSTER_CMAP, max(k, 2))
+    cmap = matplotlib.colormaps[_CLUSTER_CMAP].resampled(max(k, 2))
 
     axes[0].scatter(emb[:, 0], emb[:, 1], c=labels,
                     cmap=cmap, s=12, alpha=0.7, linewidths=0)
@@ -623,7 +623,7 @@ def _page_umap(pdf, features_sc, labels, metadata):
         else:
             gt_int = gt.astype(int)
         k_gt = len(set(gt_int))
-        cmap_gt = plt.cm.get_cmap("Set2", max(k_gt, 2))
+        cmap_gt = matplotlib.colormaps["Set2"].resampled(max(k_gt, 2))
         axes[1].scatter(emb[:, 0], emb[:, 1], c=gt_int,
                         cmap=cmap_gt, s=12, alpha=0.7, linewidths=0)
         axes[1].set_title(f"Ground truth ({gt_col})", fontsize=9)
