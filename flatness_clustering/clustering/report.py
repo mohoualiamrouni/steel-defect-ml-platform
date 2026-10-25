@@ -28,7 +28,7 @@ Usage
     from flatness_clustering.clustering.report import generate_clustering_report
 
     generate_clustering_report(
-        features=feature_matrix,       # (N, 125) float32
+        features=feature_matrix,       # (N, 1105) float32
         labels=cluster_labels,         # (N,) int
         metadata=metadata_df,          # DataFrame with coil_id, pattern, …
         profiles=profiles_array,       # (N, W, L) float32  (optional)
@@ -60,6 +60,7 @@ from flatness_clustering.clustering.metrics import (
     compute_davies_bouldin,
     compute_silhouette,
 )
+from flatness_clustering.features.statistical_features import feature_group_slices
 
 
 # ---------------------------------------------------------------------------
@@ -520,6 +521,19 @@ def _page_cluster_summary(pdf, features, labels, metadata, sil, db, ch):
 # Page 4 — Feature group overview
 # ---------------------------------------------------------------------------
 
+_GROUP_NAMES = {"A": "Group A\nZonal stats", "B": "Group B\nSnapshots", "C": "Group C\nSpectral",
+                "D": "Group D\nTemporal", "E": "Group E\nROCKET"}
+
+
+def _feature_groups() -> List[tuple]:
+    """(name, column slice) of the five feature groups, in extractor order.
+
+    Taken from the extractor's layout (30 + 50 + 15 + 10 + 1000 = 1105
+    columns) instead of hard-coding it.
+    """
+    return [(_GROUP_NAMES[g], cols) for g, cols in feature_group_slices()]
+
+
 def _page_feature_overview(pdf, features, features_sc, labels, k):  # noqa: ARG001
     """Feature overview page.
 
@@ -527,7 +541,8 @@ def _page_feature_overview(pdf, features, features_sc, labels, k):  # noqa: ARG0
         features:    Raw (N, F) feature matrix — used for group bar chart so
                      relative raw magnitudes are preserved across groups.
         features_sc: StandardScaler-normalised (N, F) — used for L2-norm per
-                     cluster so norms are on a meaningful scale (~√F ≈ 11).
+                     cluster so norms are on a meaningful scale (~√F, about 33
+                     for the 1105 features).
         labels:      (N,) cluster label array.
         k:           Number of clusters.
     """
@@ -539,29 +554,31 @@ def _page_feature_overview(pdf, features, features_sc, labels, k):  # noqa: ARG0
 
     # Group importance: mean |feature| per group on raw features
     # Shows relative energy contribution of each feature group before normalisation
-    groups = [
-        ("Group A\nZonal stats",      slice(0, 30)),
-        ("Group B\nSnapshots",        slice(30, 80)),
-        ("Group C\nSpectral",         slice(80, 95)),
-        ("Group D\nTemporal",         slice(95, 105)),
-        ("Group E\nROCKET",           slice(105, 135)),
-    ]
-    group_names = [g[0] for g in groups]
-    group_means = [float(np.abs(features[:, g[1]]).mean()) for g in groups]
-    total = sum(group_means) + 1e-12
-    group_pcts = [v / total * 100 for v in group_means]
-    group_colors = [_BLUE, _TEAL, _ORANGE, _RED, "#7B1FA2"]
+    groups = _feature_groups()
+    n_expected = groups[-1][1].stop
+    if features.shape[1] == n_expected:
+        group_names = [g[0] for g in groups]
+        group_means = [float(np.abs(features[:, g[1]]).mean()) for g in groups]
+        total = sum(group_means) + 1e-12
+        group_pcts = [v / total * 100 for v in group_means]
+        group_colors = [_BLUE, _TEAL, _ORANGE, _RED, "#7B1FA2"]
 
-    axes[0].bar(group_names, group_pcts, color=group_colors,
-                edgecolor="white", linewidth=1.2)
-    for i, v in enumerate(group_pcts):
-        axes[0].text(i, v + 1.0, f"{v:.1f}%", ha="center", fontsize=9)
-    axes[0].set_title("Feature Group Energy Share\n(raw magnitude, 5 groups / 125 dims)", fontsize=9)
-    axes[0].set_ylabel("% of total mean |feature|")
-    axes[0].set_ylim(0, max(group_pcts) * 1.2)
-    axes[0].grid(axis="y", alpha=0.3)
+        axes[0].bar(group_names, group_pcts, color=group_colors,
+                    edgecolor="white", linewidth=1.2)
+        for i, v in enumerate(group_pcts):
+            axes[0].text(i, v + 1.0, f"{v:.1f}%", ha="center", fontsize=9)
+        axes[0].set_title("Feature Group Energy Share\n"
+                          f"(raw magnitude, 5 groups / {n_expected} dims)", fontsize=9)
+        axes[0].set_ylabel("% of total mean |feature|")
+        axes[0].set_ylim(0, max(group_pcts) * 1.2)
+        axes[0].grid(axis="y", alpha=0.3)
+    else:
+        axes[0].axis("off")
+        axes[0].text(0.5, 0.5, f"Feature layout not recognised:\n{features.shape[1]} columns, "
+                     f"{n_expected} expected", ha="center", va="center", fontsize=9)
 
-    # Per-cluster feature norm on SCALED features (meaningful scale: ~√F ≈ 11)
+    # Per-cluster feature norm on SCALED features (expected scale ~√F, about 33
+    # for the 1105 features)
     cluster_ids = sorted(set(labels))
     cluster_norms = [float(np.linalg.norm(features_sc[labels == c], axis=1).mean())
                      for c in cluster_ids]
