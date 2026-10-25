@@ -8,8 +8,8 @@ gives a curve of macro-F1 vs. number of labels per strategy, from which we read
 the **budget savings**: how many more labels random sampling needs to reach the
 macro-F1 that an AL strategy reaches at a reference budget.
 
-This turns the report's asserted "économie d'annotation 7:1" (L815) into a
-measured quantity.  Strategies implemented on the embeddings directly (no CNN
+This turns the report's asserted 7:1 annotation saving into a measured
+quantity.  Strategies implemented on the embeddings directly (no CNN
 forward pass needed at simulation time):
 
 * ``random``    — uniform sampling (the baseline);
@@ -203,8 +203,27 @@ def budget_savings(df, reference_strategy: str = "typiclust",
     }
 
 
-def plot_budget_curve(df, output_path: str, savings: Dict = None) -> None:
-    """macro-F1 vs #labels, one line per strategy with a 95% CI band."""
+def _ci95_halfwidth(std, count) -> np.ndarray:
+    """Half-width of the 95% Student-t interval of a mean: t(0.975, n-1) · std / sqrt(n).
+
+    Returns 0 where fewer than 2 values exist.  With 5 seeds the quantile is
+    2.776, not the normal 1.96, which would understate the band by about 30%.
+    """
+    from scipy import stats
+
+    std = np.nan_to_num(np.asarray(std, dtype=float))
+    n = np.asarray(count, dtype=float)
+    q = np.where(n > 1, stats.t.ppf(0.975, np.maximum(n - 1, 1)), 0.0)
+    return q * std / np.sqrt(np.maximum(n, 1))
+
+
+def plot_budget_curve(df, output_path: str, savings: Dict = None,
+                      data_label: str = None) -> None:
+    """macro-F1 vs #labels, one line per strategy with a 95% CI band of the mean over seeds.
+
+    ``data_label`` names the data source in the title (for example
+    ``"calibrated-synthetic data"``).
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -213,23 +232,26 @@ def plot_budget_curve(df, output_path: str, savings: Dict = None) -> None:
     for strat, gd in df.groupby("strategy"):
         agg = gd.groupby("budget")["macro_f1"].agg(["mean", "std", "count"])
         m = agg["mean"].values
-        se = (agg["std"].fillna(0.0) / np.sqrt(agg["count"].clip(lower=1))).values
+        hw = _ci95_halfwidth(agg["std"].values, agg["count"].values)
         x = agg.index.values
         ax.plot(x, m, marker="o", label=strat)
-        ax.fill_between(x, m - 1.96 * se, m + 1.96 * se, alpha=0.15)
-    ax.set_xlabel("Nombre d'étiquettes (budget)")
-    ax.set_ylabel("Macro-F1 (jeu de test)")
-    ax.set_title("Courbe d'économie d'annotation — stratégies d'apprentissage actif")
+        ax.fill_between(x, m - hw, m + hw, alpha=0.15)
+    ax.set_xlabel("Number of labels (budget)")
+    ax.set_ylabel("Macro-F1 (test set)")
+    n_seeds = int(df["seed"].nunique()) if "seed" in df.columns else None
+    source = f" ({data_label})" if data_label else ""
+    seeds = f" over {n_seeds} seeds" if n_seeds else " over seeds"
+    ax.set_title(f"Active-learning budget curve{source}\nmean macro-F1 and Student-t 95% CI{seeds}")
     if savings and savings.get("baseline_budget_to_match"):
         ax.annotate(
-            f"{savings['baseline']} a besoin de "
-            f"{savings['baseline_budget_to_match']} étiquettes pour égaler "
+            f"{savings['baseline']} needs "
+            f"{savings['baseline_budget_to_match']} labels to match "
             f"{savings['reference_strategy']}@{savings['ref_budget']} "
-            f"(×{savings['savings_ratio']})",
+            f"(x{savings['savings_ratio']})",
             xy=(0.5, 0.05), xycoords="axes fraction", ha="center", fontsize=8,
             bbox=dict(boxstyle="round", fc="wheat", alpha=0.6),
         )
-    ax.legend(title="stratégie", fontsize=8)
+    ax.legend(title="strategy", fontsize=8)
     ax.grid(alpha=0.3)
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
