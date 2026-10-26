@@ -1,4 +1,6 @@
-"""PipelineActiveLearner renders its PDF report and its beta-history figure."""
+"""PipelineActiveLearner renders its PDF report and beta-history figure, and counts its cycles."""
+
+import json
 
 import matplotlib
 
@@ -57,3 +59,14 @@ def test_beta_history_plot_renders(tmp_path):
     out = tmp_path / "beta_history.png"
     learner.plot_beta_history(output_path=str(out))
     assert out.stat().st_size > 0
+
+
+@pytest.mark.parametrize("n_cycles", [0, 1, 3])
+def test_cycles_run_counts_every_labeling_cycle(tmp_path, n_cycles):
+    learner = _learner(2)
+    _run_cycles(learner, n_cycles)
+    assert learner.cycles_run() == n_cycles
+    # The initial β, then one update per cycle after the first.
+    assert len(learner.beta_history) == max(n_cycles, 1)
+    learner.save_history(str(tmp_path / "history.csv"))
+    assert json.loads((tmp_path / "history_summary.json").read_text())["cycles_run"] == n_cycles

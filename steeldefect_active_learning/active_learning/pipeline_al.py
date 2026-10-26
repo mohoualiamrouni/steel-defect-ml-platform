@@ -246,8 +246,12 @@ class PipelineActiveLearner:
         return self._converged_streak >= self.convergence_patience
 
     def cycles_run(self) -> int:
-        """Number of step() calls completed so far."""
-        return len(self.beta_history) - 1
+        """Number of step() calls completed so far, one per labeling cycle.
+
+        The first call only records the baseline certainty U, so β has been
+        updated one time fewer.
+        """
+        return len(self.U_history)
 
     # ----------------------------------------------------------------
     # Export / serialization
