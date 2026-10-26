@@ -967,6 +967,17 @@ def compute_all_metrics(
 # Visualisation — standard plots
 # ---------------------------------------------------------------------------
 
+def _whitegrid():
+    """Seaborn's whitegrid theme for the figures drawn inside the block only.
+
+    sns.set_theme would rewrite matplotlib's global rcParams for every later
+    figure in the process, including its Arial-first font list, which lacks
+    glyphs that other figures draw (the subscripts of the McNemar plot).
+    """
+    return plt.rc_context({**sns.axes_style("whitegrid"), **sns.plotting_context("notebook"),
+                           "axes.prop_cycle": plt.cycler(color=sns.color_palette("deep"))})
+
+
 def plot_comparison(
     df: pd.DataFrame,
     output_dir: str = "outputs/plots",
@@ -982,15 +993,14 @@ def plot_comparison(
         {prefix}_iou_distribution.png      (segmentation only)
     """
     os.makedirs(output_dir, exist_ok=True)
-    sns.set_theme(style="whitegrid")
+    with _whitegrid():
+        _plot_disagreement_rate(df, output_dir, prefix)
+        _plot_confidence_delta(df, output_dir, prefix)
 
-    _plot_disagreement_rate(df, output_dir, prefix)
-    _plot_confidence_delta(df, output_dir, prefix)
-
-    if task == "classification" and "pred_a" in df.columns:
-        _plot_per_class_agreement(df, output_dir, prefix)
-    if task == "segmentation" and "iou" in df.columns:
-        _plot_iou_distribution(df, output_dir, prefix)
+        if task == "classification" and "pred_a" in df.columns:
+            _plot_per_class_agreement(df, output_dir, prefix)
+        if task == "segmentation" and "iou" in df.columns:
+            _plot_iou_distribution(df, output_dir, prefix)
 
     plt.close("all")
 
@@ -1011,16 +1021,15 @@ def plot_advanced_comparison(
         {prefix}_per_class_accuracy_delta.png     — acc(B) − acc(A) per class
     """
     os.makedirs(output_dir, exist_ok=True)
-    sns.set_theme(style="whitegrid")
+    with _whitegrid():
+        _plot_calibration_curve(df, output_dir, prefix, model_a_name, model_b_name)
 
-    _plot_calibration_curve(df, output_dir, prefix, model_a_name, model_b_name)
+        if "entropy_a" in df.columns:
+            _plot_entropy_distribution(df, output_dir, prefix, model_a_name, model_b_name)
+            _plot_confidence_bands(df, output_dir, prefix)
 
-    if "entropy_a" in df.columns:
-        _plot_entropy_distribution(df, output_dir, prefix, model_a_name, model_b_name)
-        _plot_confidence_bands(df, output_dir, prefix)
-
-    if "pred_a" in df.columns:
-        _plot_per_class_accuracy_delta(df, output_dir, prefix, model_a_name, model_b_name)
+        if "pred_a" in df.columns:
+            _plot_per_class_accuracy_delta(df, output_dir, prefix, model_a_name, model_b_name)
 
     plt.close("all")
 

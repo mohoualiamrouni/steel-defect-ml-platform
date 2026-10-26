@@ -10,6 +10,7 @@ matplotlib.use("Agg")
 import numpy as np
 import pandas as pd
 import pytest
+import seaborn as sns
 
 from steeldefect_active_learning.ab_testing import metrics
 from steeldefect_active_learning.ab_testing.report import generate_ab_report
@@ -55,3 +56,20 @@ def test_reliability_diagram_renders(n_classes, tmp_path):
     out = tmp_path / "reliability.png"
     reliability_diagram(probs, labels, out)
     assert out.stat().st_size > 0
+
+
+def test_ab_plots_leave_the_global_style_alone(demo, tmp_path, monkeypatch):
+    # seaborn's global setters also remap the single-letter colour codes, which
+    # rcParams do not hold, so the plots must not call them at all.
+    setters = []
+    for name in ("set_theme", "set", "set_style", "set_context", "set_palette", "set_color_codes"):
+        if hasattr(sns, name):
+            monkeypatch.setattr(sns, name, lambda *args, _name=name, **kwargs: setters.append(_name))
+    with matplotlib.rc_context():
+        matplotlib.rcdefaults()
+        before = matplotlib.rcParams.copy()
+        metrics.plot_comparison(demo, output_dir=str(tmp_path))
+        metrics.plot_advanced_comparison(demo, output_dir=str(tmp_path))
+        changed = sorted(k for k, v in before.items() if matplotlib.rcParams[k] != v)
+    assert changed == []
+    assert setters == []
