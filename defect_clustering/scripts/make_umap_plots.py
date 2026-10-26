@@ -18,15 +18,35 @@ ASSIGN = ROOT / "outputs" / "cluster_assignments.csv"
 OUT = ROOT.parents[0] / "tn-report" / "template_tex" / "figures"
 
 
+def pair_rows(n_rows: int, image_ids, df: pd.DataFrame) -> pd.DataFrame:
+    """Return the assignment rows of the n_rows feature rows, in their order.
+
+    A default training run clusters a stratified subsample (subsample_n, 8000)
+    but assigns every sample, so row i of the two files holds different images.
+    Training saves the image_id of each feature row to pair them; older files
+    without it can only be paired by position, when their lengths match.
+    """
+    if image_ids is None:
+        if n_rows != len(df):
+            raise ValueError(f"{FEAT.name} has {n_rows} rows and no image_ids, but {ASSIGN.name} "
+                             f"has {len(df)} rows; rerun the training pipeline, which saves the "
+                             "image_ids with the features")
+        return df
+    ids = pd.Index(np.asarray(image_ids).astype(str))
+    if len(ids) != n_rows:
+        raise ValueError(f"{FEAT.name} has {n_rows} feature rows but {len(ids)} image_ids")
+    by_id = df.set_index(df["image_id"].astype(str))
+    if not by_id.index.is_unique or not ids.isin(by_id.index).all():
+        raise ValueError(f"the image_ids of {FEAT.name} do not each match one row of "
+                         f"{ASSIGN.name}; regenerate both from the same training run")
+    return by_id.loc[ids].reset_index(drop=True)
+
+
 def main() -> None:
     data = np.load(FEAT, allow_pickle=True)
-    X = data["X"] if "X" in data.files else data[data.files[0]]
-    df = pd.read_csv(ASSIGN)
-
-    if X.shape[0] != len(df):
-        n = min(X.shape[0], len(df))
-        X = X[:n]
-        df = df.iloc[:n].reset_index(drop=True)
+    X = data["X"] if "X" in data.files else data["features"]
+    image_ids = data["image_ids"] if "image_ids" in data.files else None
+    df = pair_rows(X.shape[0], image_ids, pd.read_csv(ASSIGN))
 
     reducer = umap.UMAP(n_neighbors=30, min_dist=0.1, random_state=42)
     Z = reducer.fit_transform(X)

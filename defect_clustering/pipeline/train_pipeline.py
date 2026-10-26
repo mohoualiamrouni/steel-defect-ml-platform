@@ -301,9 +301,10 @@ def run_training(
         }
         print(f"[train] CNN-only features (scaled): {fused_features.shape}")
 
-    # Save feature matrix
+    # Save feature matrix with each row's image_id: when Step 1 subsampled, the
+    # assignments CSV below normally covers every sample, so readers pair rows by id.
     feat_path = out / "feature_matrix.npz"
-    np.savez_compressed(feat_path, features=fused_features)
+    np.savez_compressed(feat_path, features=fused_features, image_ids=np.asarray(image_ids))
     print(f"[train] Feature matrix saved: {feat_path}")
 
     # ==================================================================
