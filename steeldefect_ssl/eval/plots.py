@@ -59,8 +59,10 @@ def plot_ssl_loss_curve(histories: List[Dict], path: str) -> None:
 
 
 def plot_embedding_umap(X, y, class_names: Optional[Sequence[str]], path: str, seed=42) -> None:
+    """2-D map of the SSL embedding. It uses PCA (see _embed2d); the function and
+    file names predate the switch from UMAP."""
     if X is None or len(X) < 5:
-        return _na(path, "Embedding UMAP")
+        return _na(path, "Embedding (PCA)")
     emb = _embed2d(np.asarray(X), seed)
     fig, ax = plt.subplots(figsize=(6, 5))
     y = np.asarray(y)
@@ -68,7 +70,7 @@ def plot_embedding_umap(X, y, class_names: Optional[Sequence[str]], path: str, s
         m = y == c
         lab = class_names[c] if (class_names is not None and 0 <= c < len(class_names)) else str(c)
         ax.scatter(emb[m, 0], emb[m, 1], s=8, alpha=.6, label=lab)
-    ax.set_title("SSL embedding (UMAP)"); ax.set_xticks([]); ax.set_yticks([])
+    ax.set_title("SSL embedding (PCA)"); ax.set_xticks([]); ax.set_yticks([])
     ax.legend(fontsize=6, markerscale=1.5, ncol=2, loc="best")
     _save(fig, path)
 
@@ -138,6 +140,8 @@ def plot_openset_roc_pr(curves: Dict[str, Dict], path: str) -> None:
 
 
 def plot_gcd_umap(X, labels, is_novel, path: str, seed=42) -> None:
+    """GCD clusters on a 2-D PCA map (see _embed2d); the name predates the switch
+    from UMAP."""
     if X is None or len(X) < 5:
         return _na(path, "GCD clusters")
     emb = _embed2d(np.asarray(X), seed)
@@ -158,13 +162,18 @@ def plot_gcd_outliers(outlier_info: Dict, path: str) -> None:
     per = outlier_info.get("per_cluster") or outlier_info
     try:
         clusters = sorted(per.keys(), key=lambda x: int(x))
-        counts = [int(per[c].get("n_outliers", per[c]) if isinstance(per[c], dict) else per[c])
+        # run_pipeline asks detect_outliers_per_cluster for the IF ∪ LOF union, stored
+        # as n_outliers_combined; a missing key draws the placeholder, never a zero bar.
+        counts = [int(per[c]["n_outliers_combined"]) if isinstance(per[c], dict) else int(per[c])
                   for c in clusters]
     except Exception:
         return _na(path, "GCD outliers")
+    # Clusters below min_cluster_size are not scored; the producer stores 0 for them.
+    skipped = [isinstance(per[c], dict) and bool(per[c].get("skipped")) for c in clusters]
     fig, ax = plt.subplots(figsize=(6, 4))
-    ax.bar([str(c) for c in clusters], counts, color="#C44E52")
-    ax.set_xlabel("cluster"); ax.set_ylabel("# outliers (IF ∪ LOF)")
+    ax.bar([f"{c}*" if s else str(c) for c, s in zip(clusters, skipped)], counts, color="#C44E52")
+    ax.set_xlabel("cluster (* = too small, not scored)" if any(skipped) else "cluster")
+    ax.set_ylabel("# outliers (IF ∪ LOF)")
     ax.set_title("Per-cluster outliers")
     _save(fig, path)
 

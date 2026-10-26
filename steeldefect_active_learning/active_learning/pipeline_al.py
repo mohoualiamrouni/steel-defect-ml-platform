@@ -246,8 +246,12 @@ class PipelineActiveLearner:
         return self._converged_streak >= self.convergence_patience
 
     def cycles_run(self) -> int:
-        """Number of step() calls completed so far."""
-        return len(self.beta_history) - 1
+        """Number of step() calls completed so far, one per labeling cycle.
+
+        The first call only records the baseline certainty U, so β has been
+        updated one time fewer.
+        """
+        return len(self.U_history)
 
     # ----------------------------------------------------------------
     # Export / serialization
@@ -517,7 +521,9 @@ class PipelineActiveLearner:
             for hi, hdr in zip(col_x, ["Stage", "Label", "β (final)", "β (initial)"]):
                 ax_t.text(hi, 0.88, hdr, fontsize=8.5, fontweight="bold",
                           color=DARK, transform=ax_t.transAxes)
-            ax_t.axhline(0.84, color=GREY, lw=0.5, transform=ax_t.transAxes)
+            # axhline rejects a transform (it builds its own), so draw the rules as
+            # plain lines in axes coordinates.
+            ax_t.plot([0, 1], [0.84, 0.84], color=GREY, lw=0.5, transform=ax_t.transAxes)
             for d in range(self.D):
                 y = 0.78 - d * 0.14
                 row_vals = [str(d), labels[d],
@@ -526,7 +532,8 @@ class PipelineActiveLearner:
                     fw = "bold" if d == dominant else "normal"
                     ax_t.text(xi, y, val, fontsize=8.5, color=BLUE if d == dominant else DARK,
                               fontweight=fw, transform=ax_t.transAxes)
-                ax_t.axhline(y - 0.05, color="#E0E0E0", lw=0.3, transform=ax_t.transAxes)
+                ax_t.plot([0, 1], [y - 0.05, y - 0.05], color="#E0E0E0", lw=0.3,
+                          transform=ax_t.transAxes)
 
             # Algorithm reference
             fig.text(0.5, 0.20,

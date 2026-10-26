@@ -59,8 +59,10 @@ Use the **`python`** interpreter (Python 3.12 with a CPU build of torch), not `p
 * `steeldefect_ssl_metrics.json` — single source of truth (all metrics + H4 verdict).
 * CSVs: `pretrain_curve`, `probe_results`, `clustering_uplift`, `openset_results`,
   `gcd_results`, `continual_results`.
-* `plots/` — 9 figures: SSL loss, embedding UMAP-style map, probe bars, clustering
-  uplift, open-set score hist, ROC/PR, GCD clusters, GCD outliers, continual forgetting.
+* `plots/` — 9 figures: SSL loss, 2-D PCA map of the embedding, probe bars, clustering
+  uplift, open-set score hist, ROC/PR, GCD clusters (PCA map), GCD outliers, continual
+  forgetting. The `umap` in `embedding_umap.png` and `gcd_umap.png` predates the switch
+  to PCA (`_embed2d` in `eval/plots.py` says why).
 
 ## H4 acceptance bar (numbers flow from the JSON, never hand-edited)
 * **H4-A**: `ssl.nmi_ci_low > pca.nmi` and `ssl.nmi − pca.nmi ≥ 0.05`; SSL linear
