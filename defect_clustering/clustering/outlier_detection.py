@@ -78,7 +78,11 @@ def detect_outliers_per_cluster(
     outlier_mask : ndarray of shape (N,), dtype=bool
         True for outlier samples.
     info : dict
-        Per-cluster details: n_outliers, methods, cluster sizes.
+        strategy, contamination, total_outliers, total_outliers_if,
+        total_outliers_lof, outlier_rate, and per_cluster: for each cluster
+        id, size, n_outliers_if, n_outliers_lof, n_outliers_combined (the
+        union or intersection, per strategy) and skipped (clusters smaller
+        than min_cluster_size are not scored and store 0).
     """
     from sklearn.ensemble import IsolationForest
     from sklearn.neighbors import LocalOutlierFactor
