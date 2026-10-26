@@ -2,10 +2,16 @@
 
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
+
+import matplotlib
+
+matplotlib.use("Agg")
 
 import numpy as np
 import pandas as pd
 import pytest
+from matplotlib.axes import Axes
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "make_umap_plots.py"
 
@@ -48,3 +54,56 @@ def test_files_without_image_ids_pair_by_position_only_when_lengths_match(script
     assert script.pair_rows(5, None, assignments) is assignments
     with pytest.raises(ValueError, match="has 3 rows"):
         script.pair_rows(3, None, assignments)
+
+
+class _FirstTwoColumns:
+    """Stand-in for umap.UMAP: these tests check the pairing and the files."""
+
+    def __init__(self, **kwargs):
+        pass
+
+    def fit_transform(self, X):
+        return X[:, :2]
+
+
+@pytest.fixture
+def outputs(script, assignments, tmp_path, monkeypatch):
+    """Point the script at tmp_path; return a writer for its feature file."""
+    assignments.to_csv(tmp_path / "cluster_assignments.csv", index=False)
+    monkeypatch.setattr(script, "FEAT", tmp_path / "feature_matrix.npz")
+    monkeypatch.setattr(script, "ASSIGN", tmp_path / "cluster_assignments.csv")
+    monkeypatch.setattr(script, "OUT", tmp_path / "figures")
+    monkeypatch.setattr(script, "umap", SimpleNamespace(UMAP=_FirstTwoColumns))
+
+    def write_features(**arrays):
+        np.savez(tmp_path / "feature_matrix.npz", features=np.zeros((3, 4)), **arrays)
+    return write_features
+
+
+def test_main_colours_each_point_with_its_own_rows(script, outputs, tmp_path, monkeypatch):
+    colours = []
+    scatter = Axes.scatter
+
+    def spy(ax, *args, **kwargs):
+        colours.append([int(code) for code in kwargs["c"]])
+        return scatter(ax, *args, **kwargs)
+
+    monkeypatch.setattr(Axes, "scatter", spy)
+    outputs(image_ids=np.array(["c", "a", "d"]))
+    script.main()
+    assert sorted(p.name for p in (tmp_path / "figures").iterdir()) == [
+        "dc_umap_expert.png", "dc_umap_proposed.png"]
+    # Category codes of the paired rows: clusters [2, 0, 3] and groups [g2, g0, g3]
+    # both code to [1, 0, 2]; pairing by position would give [0, 1, 2].
+    assert colours == [[1, 0, 2], [1, 0, 2]]
+
+
+def test_figures_go_to_the_package_outputs(script):
+    assert script.OUT == SCRIPT.parents[1] / "outputs" / "figures"
+
+
+def test_unpairable_files_raise_before_any_output(script, outputs, tmp_path):
+    outputs()   # three feature rows, five assignment rows, no image_ids
+    with pytest.raises(ValueError, match="has 3 rows"):
+        script.main()
+    assert not (tmp_path / "figures").exists()

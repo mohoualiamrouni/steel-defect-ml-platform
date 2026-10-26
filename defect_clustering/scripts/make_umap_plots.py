@@ -1,4 +1,8 @@
-"""Generate UMAP plots colored by (a) automatic cluster, (b) expert group."""
+"""Generate UMAP plots colored by (a) automatic cluster, (b) expert group.
+
+Reads the training outputs in defect_clustering/outputs/ and writes the two PNGs
+to defect_clustering/outputs/figures/.
+"""
 from __future__ import annotations
 
 import os
@@ -15,7 +19,7 @@ import umap
 ROOT = Path(__file__).resolve().parents[1]
 FEAT = ROOT / "outputs" / "feature_matrix.npz"
 ASSIGN = ROOT / "outputs" / "cluster_assignments.csv"
-OUT = ROOT.parents[0] / "tn-report" / "template_tex" / "figures"
+OUT = ROOT / "outputs" / "figures"
 
 
 def pair_rows(n_rows: int, image_ids, df: pd.DataFrame) -> pd.DataFrame:
@@ -47,13 +51,14 @@ def main() -> None:
     X = data["X"] if "X" in data.files else data["features"]
     image_ids = data["image_ids"] if "image_ids" in data.files else None
     df = pair_rows(X.shape[0], image_ids, pd.read_csv(ASSIGN))
+    OUT.mkdir(parents=True, exist_ok=True)
 
     reducer = umap.UMAP(n_neighbors=30, min_dist=0.1, random_state=42)
     Z = reducer.fit_transform(X)
 
     for col, fname, title in [
-        ("cluster_id", "dc_umap_proposed.png", "UMAP — clusters automatiques"),
-        ("expert_group", "dc_umap_expert.png", "UMAP — groupes experts"),
+        ("cluster_id", "dc_umap_proposed.png", "UMAP: automatic clusters"),
+        ("expert_group", "dc_umap_expert.png", "UMAP: expert groups"),
     ]:
         fig, ax = plt.subplots(figsize=(8, 6))
         labels = df[col].astype("category")
