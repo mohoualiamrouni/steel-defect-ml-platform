@@ -7,6 +7,7 @@ import pytest
 
 from defect_clustering.features.segmentation_features import (
     N_BASE_FEATURES,
+    extract_batch,
     extract_region_features,
     extract_segmentation_features,
 )
@@ -51,6 +52,42 @@ def test_a_label_image_keeps_its_labels():
     mask[15:25, 15:25] = 5
     feats = extract_region_features(mask)
     assert sorted(feats[:, 0]) == [61.0, 100.0]
+
+
+def test_batch_matches_one_by_one_extraction():
+    masks = [_two_blobs(255), _two_blobs(1), np.zeros((40, 40), dtype=np.uint8)]
+    images = [(np.arange(1600).reshape(40, 40) * (i + 1) % 256).astype(np.uint8) for i in range(3)]
+    batch = extract_batch(masks, intensity_images=images, n_jobs=2)
+    one_by_one = [extract_segmentation_features(m, img) for m, img in zip(masks, images)]
+    np.testing.assert_array_equal(batch, np.stack(one_by_one))
+    np.testing.assert_array_equal(extract_batch(masks, n_jobs=2),
+                                  np.stack([extract_segmentation_features(m) for m in masks]))
+    np.testing.assert_array_equal(
+        extract_batch(masks, intensity_images=images, aggregation="mean", n_jobs=2),
+        np.stack([extract_segmentation_features(m, img, aggregation="mean")
+                  for m, img in zip(masks, images)]))
+
+
+def test_each_batch_task_carries_only_its_own_mask(monkeypatch):
+    # A closure over the two lists pickled the whole batch into every task.
+    try:
+        import cloudpickle
+    except ImportError:   # joblib < 1.6 vendors it
+        from joblib.externals import cloudpickle
+    import joblib
+
+    sizes = []
+
+    class Recorder(joblib.Parallel):
+        def __call__(self, iterable):
+            tasks = list(iterable)
+            sizes.extend(len(cloudpickle.dumps(task)) for task in tasks)
+            return super().__call__(tasks)
+
+    monkeypatch.setattr(joblib, "Parallel", Recorder)
+    masks = [_two_blobs(255) for _ in range(30)]
+    extract_batch(masks, intensity_images=masks, n_jobs=1)
+    assert len(sizes) == 30 and max(sizes) < 4 * 2 * masks[0].nbytes
 
 
 def test_no_deprecated_regionprops_property_is_read():

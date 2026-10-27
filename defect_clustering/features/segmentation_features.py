@@ -414,12 +414,12 @@ def extract_batch(
             f"{len(intensity_images)} intensity images."
         )
 
-    def _extract_one(idx):
-        intensity = intensity_images[idx] if intensity_images is not None else None
-        return extract_segmentation_features(masks[idx], intensity, aggregation)
-
+    images = intensity_images if intensity_images is not None else [None] * len(masks)
+    # Hand each worker its own mask and image: a closure over the two lists
+    # would pickle the whole batch into every task.
     results = Parallel(n_jobs=n_jobs)(
-        delayed(_extract_one)(i) for i in range(len(masks))
+        delayed(extract_segmentation_features)(mask, image, aggregation)
+        for mask, image in zip(masks, images)
     )
 
     return np.stack(results, axis=0)
