@@ -101,3 +101,43 @@ def test_adwin_detects_level_shift():
     stream = [0.5] * 40 + [0.95] * 40
     state = drift.ADWINState()
     assert any(state.update(v) for v in stream), "ADWIN should flag the level shift"
+
+
+# --- OBT morphology backfill --------------------------------------------------
+
+def _two_blobs():
+    mask = np.zeros((40, 40), dtype=np.uint8)
+    mask[2:8, 2:8] = 255        # 36 px
+    mask[20:35, 15:35] = 255    # 300 px
+    return mask
+
+
+def _backfill(monkeypatch, mask, **row):
+    """Run the ingestion UDF on one landing row whose mask decodes to *mask*."""
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    from steeldefect_platform import ingestion, io_utils
+
+    cols = ["segmentation_id", "mask_uri", *obt_schema.MORPHO_NAMES, "_dq_valid", "_dq_reason"]
+    monkeypatch.setattr(ingestion, "_udf_struct_type",
+                        lambda: SimpleNamespace(fields=[SimpleNamespace(name=c) for c in cols]))
+    monkeypatch.setattr(io_utils, "decode_mask_uri", lambda uri, loader=None: mask)
+    monkeypatch.setattr(sys, "path", list(sys.path))   # the UDF prepends a workspace root
+    return ingestion._segmentation_to_obt_udf(
+        pd.DataFrame([{"segmentation_id": "s1", "mask_uri": "m.npy", **row}]))
+
+
+def test_backfill_stores_the_mean_over_the_mask_components(monkeypatch):
+    assert _backfill(monkeypatch, _two_blobs()).loc[0, "area"] == 168.0
+
+
+def test_backfill_leaves_an_empty_mask_null(monkeypatch):
+    out = _backfill(monkeypatch, np.zeros((40, 40), dtype=np.uint8))
+    assert out[list(obt_schema.MORPHO_NAMES)].isna().to_numpy().all()
+
+
+def test_backfill_runs_when_the_area_is_missing(monkeypatch):
+    # pandas 3 reads this None as NaN, which the guard must treat as missing.
+    assert _backfill(monkeypatch, _two_blobs(), area=None).loc[0, "area"] == 168.0

@@ -64,16 +64,17 @@ def _segmentation_to_obt_udf(pdf, source_version: str = SOURCE_SYNTHETIC):
         d = r.to_dict()
         d.setdefault("cnn_dim", CNN_DIM)
         d.setdefault("source_version", source_version)
-        if d.get("area") is None and d.get("mask_uri"):  # morphology backfill
+        if pd.isna(d.get("area")) and d.get("mask_uri"):  # morphology backfill
             try:
                 from defect_clustering.features.segmentation_features import (
-                    extract_region_features,
+                    extract_segmentation_features,
                 )
                 import numpy as np
                 from .io_utils import decode_mask_uri
                 mask = decode_mask_uri(d["mask_uri"])
-                if mask is not None:
-                    feats = extract_region_features(mask)  # (24,) mean vector
+                # An empty mask has no morphology: its columns stay null.
+                if mask is not None and np.count_nonzero(mask):
+                    feats = extract_segmentation_features(mask, aggregation="mean")  # (24,)
                     for name, val in zip(MORPHO_NAMES, np.asarray(feats).reshape(-1)):
                         d[name] = float(val)
             except Exception:
