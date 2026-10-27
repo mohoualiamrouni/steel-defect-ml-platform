@@ -96,7 +96,11 @@ registry, and the jobs DAG ordering. No Databricks workspace and no GPU are need
 
 To deploy on Databricks, see [`DEPLOY_RUNBOOK.md`](DEPLOY_RUNBOOK.md)
 (`databricks bundle validate / deploy / run`). CI runs a syntax check and the test
-suites on every pull request and on every push to main (`.github/workflows/ci.yml`).
+suites on every pull request, on every push to main and every Monday
+(`.github/workflows/ci.yml`). `requirements.txt` only sets minimum versions, so each run
+installs the newest release of each dependency and prints the versions it resolved; the
+Monday run shows a breaking upstream release even without a push. GitHub disables
+scheduled workflows in a public repository after 60 days without activity.
 
 ## Status
 

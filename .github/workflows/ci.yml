@@ -4,6 +4,12 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  # requirements.txt only sets minimum versions, so each run installs the newest
+  # release of every dependency. A weekly run shows a breaking upstream release
+  # without waiting for the next push.
+  schedule:
+    - cron: "17 6 * * 1"   # Mondays, 06:17 UTC
+  workflow_dispatch:
 
 jobs:
   test:
@@ -26,6 +32,9 @@ jobs:
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
           pip install pytest
+
+      - name: Record the resolved versions
+        run: pip freeze
 
       - name: Syntax check (compileall)
         run: |
