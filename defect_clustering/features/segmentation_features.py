@@ -182,10 +182,10 @@ def _region_to_vector(
     eccentricity = float(region.eccentricity)
     solidity = float(region.solidity)
     extent = float(region.extent)
-    major_axis = float(region.major_axis_length)
-    minor_axis = float(region.minor_axis_length)
+    major_axis = float(region.axis_major_length)
+    minor_axis = float(region.axis_minor_length)
     orientation = float(region.orientation)
-    equiv_diam = float(region.equivalent_diameter)
+    equiv_diam = float(region.equivalent_diameter_area)
 
     min_row, min_col, max_row, max_col = region.bbox
     bbox_h = max_row - min_row
@@ -254,8 +254,11 @@ def extract_region_features(
     Parameters
     ----------
     mask : np.ndarray
-        2-D binary (bool / 0-1) or integer-labeled mask.  If binary, connected
-        components are computed automatically via ``skimage.measure.label``.
+        2-D binary (bool, 0/1 or 0/255) or integer-labeled mask.  If binary,
+        connected components (8-connectivity) are computed via
+        ``skimage.measure.label``, one region each.  The values decide, not
+        the dtype: a label image whose only label is 1 or 255 counts as
+        binary.
     intensity_image : np.ndarray or None, optional
         Greyscale intensity image of the same spatial dimensions as *mask*.
         Used for GLCM texture computation.  When *None*, the binary mask is
@@ -295,9 +298,12 @@ def extract_region_features(
                 f"mask shape {mask.shape}"
             )
 
-    # Label binary masks; integer-labeled masks are used as-is.
-    if mask.dtype == bool or set(np.unique(mask)).issubset({0, 1}):
-        labeled = label(mask.astype(np.uint8), connectivity=2)
+    # Binary masks (bool, 0/1, or the 0/255 of OpenCV thresholds and the
+    # synthetic mask drawers) are split into connected components; any other
+    # integer mask is read as a label image.
+    values = set(np.unique(mask).tolist())
+    if mask.dtype == bool or values <= {0, 1} or values <= {0, 255}:
+        labeled = label(mask > 0, connectivity=2)
     else:
         labeled = mask
 
