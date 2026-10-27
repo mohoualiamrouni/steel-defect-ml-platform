@@ -118,3 +118,9 @@ steeldefect_platform/  OBT schema, jobs DAG, MLflow registry, ingestion, drift, 
 databricks.yml         Databricks Asset Bundle (serverless jobs and schedules)
 DEPLOY_RUNBOOK.md      deploy and operate
 ```
+
+## License
+
+The code is released under the [MIT License](LICENSE). The license covers the code in this
+repository, not datasets: the NEU-DET images are not redistributed here, and the NEU-DET
+section above says how to obtain and cite them.
