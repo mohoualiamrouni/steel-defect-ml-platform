@@ -32,6 +32,8 @@ figures/
 *.jpg
 *.jpeg
 **/data/synthetic/
+# Generated flatness profiles; their metadata.csv records absolute local paths.
+**/data/synthetic_profiles/
 **/data/sample_images/
 **/outputs/
 

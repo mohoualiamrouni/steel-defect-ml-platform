@@ -78,9 +78,11 @@ CLASS_NAMES: List[str] = [
 ]
 CLASS_IDS: Dict[str, int] = {name: i for i, name in enumerate(CLASS_NAMES)}
 
-# Representative steel grades and customers (synthetic)
+# Representative steel grades and customers (synthetic). The customer codes are
+# fictitious (suffix: NA = North America, Aero = aerospace). rng.choice draws by
+# position: reordering a list changes the labels that a given seed produces.
 GRADES = ["DC04", "DP600", "DP800", "HC220", "DX54D"]
-CUSTOMERS = ["GM_NA", "Ford_NA", "Boeing_Aero", "SpaceX_Aero", "Tesla_NA"]
+CUSTOMERS = ["OEM_C_NA", "OEM_B_NA", "OEM_A_Aero", "OEM_D_Aero", "OEM_E_NA"]
 
 
 # ---------------------------------------------------------------------------
