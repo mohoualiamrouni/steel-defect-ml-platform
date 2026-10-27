@@ -85,7 +85,7 @@ On a machine without a GPU, install the CPU build of PyTorch first, as CI does:
 
 ```bash
 pip install -r requirements.txt pytest   # core ML deps (pyspark/delta come from the Databricks Runtime)
-pytest -q                                # unit tests for P1, P4, the flatness pipeline and the platform (P2 and P3 have none yet)
+pytest -q                                # unit tests for P1, P2, P4, the flatness pipeline and the platform (P3 has none yet)
 python -m steeldefect_platform.demo_industrialization
 ```
 
