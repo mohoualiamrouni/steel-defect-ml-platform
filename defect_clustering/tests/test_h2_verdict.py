@@ -36,7 +36,7 @@ def test_passes_when_the_ci_clears_cnn_and_the_gain_is_large():
 
 
 def test_fails_on_the_neu_det_numbers():
-    v = h2_verdict(_table(0.8765, 0.8776, 0.8643, 0.8963))
+    v = h2_verdict(_table(0.8765, 0.8836, 0.8714, 0.8994))
     assert not v["ci_low_above_cnn"] and not v["gain_ok"] and not v["passed"]
 
 

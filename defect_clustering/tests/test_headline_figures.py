@@ -39,7 +39,7 @@ def annotations(monkeypatch):
 
 
 def test_not_met_comes_from_the_table(tmp_path, annotations):
-    _write_ablation(tmp_path, 0.8765, 0.8776, (0.8643, 0.8963))
+    _write_ablation(tmp_path, 0.8765, 0.8836, (0.8714, 0.8994))
     figures.defect_figures(base=str(tmp_path), data_label="NEU-DET")
     assert (tmp_path / "plots" / "h2_ablation.png").exists()
     assert any(t.endswith("H2 not met") for t in annotations)

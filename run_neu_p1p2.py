@@ -3,9 +3,9 @@ REAL public NEU-DET dataset, reusing the existing pipeline functions on precompu
 real features. Honest provenance: source_version='neu-det-v1' (public, NOT plant data).
 
   CNN embedding : torchvision EfficientNet-B0 (ImageNet), GAP + L2, 1280-d  -> stands in for the inspection CNN
-  Morphology    : 24 regionprops+Hu+GLCM descriptors (defect_clustering.features) of the Otsu
-                  foreground; aggregation='mean_max' returns 48 columns, but the 0/255 mask is
-                  read as one labelled region, so mean == max (24 distinct values; a known bug)
+  Morphology    : 24 regionprops+Hu+GLCM descriptors (defect_clustering.features) of each
+                  8-connected component of the Otsu foreground, aggregated by mean and max
+                  over the components (48 columns)
   P2 (H2)       : defect_clustering.analysis.group_analysis.run_ablation (cnn vs fusion)
   P1 (H1)       : steeldefect_active_learning.active_learning.budget_curve.* (savings curve)
 
@@ -61,7 +61,9 @@ def cnn_embeddings(paths, cache=os.path.join(DC_OUT, "neu_cnn.npy")):
     return X
 
 
-def morphology(paths, cache=os.path.join(DC_OUT, "neu_morph.npy")):
+def morphology(paths, cache=os.path.join(DC_OUT, "neu_morph_v2.npy")):
+    # v2: one region per connected component. neu_morph.npy came from an extractor that
+    # read the 0/255 mask as a single region, so it must not be reused.
     if os.path.exists(cache):
         return np.load(cache)
     import cv2

@@ -41,15 +41,20 @@ strip images in six defect classes (`run_neu_p1p2.py`, summary in
 `outputs_neu_p1p2_summary.json`). Both use a frozen ImageNet EfficientNet-B0 embedding
 (global average pooling, 1,280-d, L2-normalized) as a stand-in for the inspection CNN.
 P2 also uses morphology features of an Otsu mask: 24 region descriptors (shape, Hu
-moments, GLCM texture). The code requests a mean and max aggregation over the mask's
-regions (48 columns), but the 0/255 mask is read as a single labelled region, so the two
-halves are identical and only 24 values are distinct. This is a bug, to be fixed in a
-separate change; the P2 numbers below were computed with it. Neither hypothesis is
-confirmed on this dataset, and both results are reported as measured:
+moments, GLCM texture) for each 8-connected component of the mask, averaged and maxed
+over the components (48 columns). These masks are noisy: an image holds a median of 185
+components, and 87.5% of all components are smaller than 10 pixels, so the averages are
+dominated by thresholding specks, and so are several maxima: the largest eccentricity,
+solidity and extent over an image's components equal 1, the value of tiny specks, in
+more than 97% of the images. Neither hypothesis is confirmed on this dataset, and both
+results are reported as measured:
 
 - **P2, feature fusion**: fusing morphology features with the CNN embedding gives an
-  NMI of 0.8776 (95% bootstrap CI 0.8643 to 0.8963, 100 resamples), against 0.8765 for
-  the CNN embedding alone. The +0.0011 difference is not significant.
+  NMI of 0.8836 (95% bootstrap CI 0.8714 to 0.8994, 100 resamples), against 0.8765 for
+  the CNN embedding alone. H2 requires the lower bound of that interval to exceed the
+  CNN-only NMI and the gain to reach 0.03: the lower bound is below 0.8765 and the gain
+  is +0.0071, so H2 is not met. Before a masking bug was fixed, each mask counted as a
+  single region and the fusion reached 0.8776 (+0.0011).
 - **P1, active learning**: with 100 labels, random sampling reaches a mean macro-F1 of
   0.9396 against 0.9034 for TypiClust (5 seeds), so active learning saves no labels at
   that budget (savings ratio 1.0). Over the whole curve, TypiClust's mean is above
