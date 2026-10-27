@@ -64,7 +64,7 @@ def _segmentation_to_obt_udf(pdf, source_version: str = SOURCE_SYNTHETIC):
         d = r.to_dict()
         d.setdefault("cnn_dim", CNN_DIM)
         d.setdefault("source_version", source_version)
-        if d.get("area") is None and d.get("mask_uri"):  # morphology backfill
+        if pd.isna(d.get("area")) and d.get("mask_uri"):  # morphology backfill
             try:
                 from defect_clustering.features.segmentation_features import (
                     extract_segmentation_features,

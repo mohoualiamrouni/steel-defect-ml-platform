@@ -136,3 +136,8 @@ def test_backfill_stores_the_mean_over_the_mask_components(monkeypatch):
 def test_backfill_leaves_an_empty_mask_null(monkeypatch):
     out = _backfill(monkeypatch, np.zeros((40, 40), dtype=np.uint8))
     assert out[list(obt_schema.MORPHO_NAMES)].isna().to_numpy().all()
+
+
+def test_backfill_runs_when_the_area_is_missing(monkeypatch):
+    # pandas 3 reads this None as NaN, which the guard must treat as missing.
+    assert _backfill(monkeypatch, _two_blobs(), area=None).loc[0, "area"] == 168.0
