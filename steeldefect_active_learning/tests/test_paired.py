@@ -443,6 +443,16 @@ def test_resolve_correctness_needs_labels_only_for_predictions():
     assert ca.tolist() == [True, False] and cb.tolist() == [True, True]
 
 
+def test_class_cells_need_no_identifier(demo):
+    rows, errors = paired.class_cells(demo.drop(columns=["image_path"]))
+    assert errors == []
+    cells = [{k: r[k] for k in ("class", "n", *paired.CELLS)} for r in rows]
+    assert cells == [{k: r[k] for k in ("class", "n", *paired.CELLS)}
+                     for r in paired.paired_counts(demo)["per_class"]]
+    rows, errors = paired.class_cells(pd.DataFrame({"correct_a": [1], "correct_b": [0]}))
+    assert rows == [] and errors == ["class column 'label' is missing"]
+
+
 def test_paired_counts_errors_on_hand_built_blocks(demo):
     good = paired.paired_counts(demo)
     assert paired.paired_counts_errors(None) == ["paired_counts block missing"]

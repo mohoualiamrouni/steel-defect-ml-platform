@@ -175,6 +175,38 @@ def resolve_correctness(
     return v["correct_a"], v["correct_b"], v["errors"], v["source"]
 
 
+def _per_class_rows(labels: np.ndarray, ca: np.ndarray, cb: np.ndarray,
+                    names: Mapping[Any, Optional[str]]) -> List[Dict[str, Any]]:
+    """The four cells per true class, sorted by class."""
+    keys, inverse = np.unique(labels, return_inverse=True)
+    rows = []
+    for j, k in enumerate(keys):
+        sel = inverse == j
+        a, b = ca[sel], cb[sel]
+        rows.append({
+            "class": _py(k), "name": names.get(_py(k)), "n": int(sel.sum()),
+            "both_correct": int(np.sum(a & b)), "only_a_correct": int(np.sum(a & ~b)),
+            "only_b_correct": int(np.sum(~a & b)), "both_wrong": int(np.sum(~a & ~b)),
+        })
+    return rows
+
+
+def class_cells(df: pd.DataFrame, *, class_col: str = "label") -> Tuple[List[Dict[str, Any]], List[str]]:
+    """The four cells per true class, from validated labels and correctness.
+
+    Unlike :func:`paired_counts`, this checks no image identifier, cluster or ``arm``
+    column: it serves the diagnostic per-class McNemar suite, not the gate.
+
+    Returns:
+        (rows, errors): one row per class as in ``paired_counts['per_class']``, sorted by
+        class, and the validation errors (rows is empty when there are any).
+    """
+    v = _validated(df, class_col, require_labels=True)
+    if v["errors"]:
+        return [], v["errors"]
+    return _per_class_rows(v["labels"], v["correct_a"], v["correct_b"], {}), []
+
+
 def paired_counts(
     df: pd.DataFrame,
     *,
@@ -264,14 +296,7 @@ def paired_counts(
         "both_correct": int(both.sum()), "only_a_correct": int(only_a.sum()),
         "only_b_correct": int(only_b.sum()), "both_wrong": int(neither.sum()),
     })
-    keys, inverse = np.unique(labels, return_inverse=True)
-    for j, k in enumerate(keys):
-        sel = inverse == j
-        out["per_class"].append({
-            "class": _py(k), "name": names.get(_py(k)), "n": int(sel.sum()),
-            "both_correct": int(both[sel].sum()), "only_a_correct": int(only_a[sel].sum()),
-            "only_b_correct": int(only_b[sel].sum()), "both_wrong": int(neither[sel].sum()),
-        })
+    out["per_class"] = _per_class_rows(labels, ca, cb, names)
     pa, pb = v["pred_a"], v["pred_b"]
     if pa is not None and pb is not None:
         out["predictions_available"] = True
