@@ -11,9 +11,10 @@ Usage:
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, List, Mapping, Optional
 import yaml
 
 
@@ -240,6 +241,94 @@ class PipelineConfig:
     anomaly: AnomalyConfig = field(default_factory=AnomalyConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+
+
+# ---------------------------------------------------------------------------
+# Promotion-gate thresholds
+# ---------------------------------------------------------------------------
+
+def _is_number(x: Any) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+
+
+def _is_class_id(x: Any) -> bool:
+    return (isinstance(x, int) and not isinstance(x, bool)) or isinstance(x, str)
+
+
+def check_gate_thresholds(
+    *,
+    alpha: Any,
+    min_gain: Any,
+    noninferiority_margin: Any,
+    class_margins: Optional[Mapping],
+    expected_classes: Any,
+    class_prior: Any,
+    false_alarm_margin: Any,
+    class_false_alarm_margins: Optional[Mapping],
+    min_detectable_gain: Any,
+    planning_discordance: Any,
+    power: Any,
+    require_no_class_regression: Any,
+) -> None:
+    """Raise ValueError if a promotion-gate threshold is out of range or inconsistent.
+
+    Pure Python, so that the gate and the config loader apply the same rules. None for
+    expected_classes or class_prior is valid: it means "not configured", and the gate
+    then keeps A.
+    """
+    p = "ab_testing.promotion."
+    if not (_is_number(alpha) and 0.0 < alpha < 0.5):
+        raise ValueError(f"ab_testing.alpha must be a number in (0, 0.5), got {alpha!r}")
+    if not (_is_number(min_gain) and 0.0 <= min_gain < 1.0):
+        raise ValueError(f"{p}min_gain must be a number in [0, 1), got {min_gain!r}")
+    if not (_is_number(noninferiority_margin) and 0.0 < noninferiority_margin < 1.0):
+        raise ValueError(f"{p}noninferiority_margin must be a number in (0, 1), "
+                         f"got {noninferiority_margin!r}")
+    if expected_classes is not None:
+        if isinstance(expected_classes, (str, bytes)) or not hasattr(expected_classes, "__iter__"):
+            raise ValueError(f"{p}expected_classes must be a list of class ids, got {expected_classes!r}")
+        ec = list(expected_classes)
+        all_int = all(isinstance(k, int) and not isinstance(k, bool) for k in ec)
+        all_str = all(isinstance(k, str) for k in ec)
+        if not ec or not (all_int or all_str) or len(set(ec)) != len(ec):
+            raise ValueError(f"{p}expected_classes must be a non-empty list of int or of str "
+                             f"class ids, without repeats, got {expected_classes!r}")
+    for key, margins in (("class_margins", class_margins),
+                         ("class_false_alarm_margins", class_false_alarm_margins)):
+        margins = dict(margins or {})
+        for k, m in margins.items():
+            if not _is_class_id(k):
+                raise ValueError(f"{p}{key} keys must be int or str class ids, got {k!r}")
+            if not (_is_number(m) and 0.0 < m < 1.0):
+                raise ValueError(f"{p}{key}[{k!r}] must be a number in (0, 1), got {m!r}")
+        stray = [k for k in margins if expected_classes is not None and k not in set(expected_classes)]
+        if stray:
+            raise ValueError(f"{p}{key} name classes outside expected_classes: {stray}")
+    if class_prior is not None and class_prior != "slice":
+        if not isinstance(class_prior, Mapping):
+            raise ValueError(f"{p}class_prior must be null, 'slice' or a mapping of class "
+                             f"shares, got {class_prior!r}")
+        if expected_classes is None or set(class_prior) != set(expected_classes):
+            raise ValueError(f"{p}class_prior keys must be exactly expected_classes")
+        values = list(class_prior.values())
+        if not all(_is_number(v) and v >= 0 for v in values) or sum(values) <= 0:
+            raise ValueError(f"{p}class_prior shares must be numbers >= 0 with a positive sum")
+    if false_alarm_margin is not None and not (_is_number(false_alarm_margin)
+                                               and 0.0 < false_alarm_margin < 1.0):
+        raise ValueError(f"{p}false_alarm_margin must be null or a number in (0, 1), "
+                         f"got {false_alarm_margin!r}")
+    if not (_is_number(min_detectable_gain) and min_gain < min_detectable_gain < 1.0):
+        raise ValueError(f"{p}min_detectable_gain must be a number in (min_gain, 1), "
+                         f"got {min_detectable_gain!r}")
+    if not (_is_number(planning_discordance)
+            and min_detectable_gain <= planning_discordance <= 1.0):
+        raise ValueError(f"{p}planning_discordance must be a number in "
+                         f"[min_detectable_gain, 1], got {planning_discordance!r}")
+    if not (_is_number(power) and 0.5 <= power < 1.0):
+        raise ValueError(f"{p}power must be a number in [0.5, 1), got {power!r}")
+    if not isinstance(require_no_class_regression, bool):
+        raise ValueError(f"{p}require_no_class_regression must be true or false, "
+                         f"got {require_no_class_regression!r}")
 
 
 # ---------------------------------------------------------------------------
