@@ -78,7 +78,7 @@ ab_testing:
   confidence_threshold: 0.5              # not implemented: forwarded to run_ab_comparison, which ignores it
   alpha: 0.05                            # one-sided level of the promotion gate; also the diagnostics' level
   multiple_testing_correction: "benjamini-hochberg"  # bonferroni | holm | benjamini-hochberg | none; diagnostic per-class McNemar only, the gate needs none
-  srm_threshold: 1.0e-3                  # diagnostic SRM check; nothing refuses results on it
+  srm_threshold: 1.0e-3                  # diagnostic SRM, computed only with an 'arm' column (the paired gate refuses such frames)
   expected_arm_ratio: 0.5                # expected fraction of arm A for that diagnostic
   bootstrap_n: 1000                      # Resamples for percentile / BCa CIs
   cuped_covariate: null                  # column name for CUPED variance reduction; null = off

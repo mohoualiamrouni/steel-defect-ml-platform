@@ -125,7 +125,9 @@ class ABTestingConfig:
                                        gate's per-class clause is an intersection-union
                                        test and needs none.
         srm_threshold:                 χ² p-value below which the diagnostic SRM check
-                                       flags a mismatch. Nothing refuses results on it.
+                                       flags a mismatch; computed only for frames with an
+                                       'arm' column, which the paired gate refuses.
+                                       Nothing refuses results on it.
         expected_arm_ratio:            Expected fraction in arm A (default 0.5).
         bootstrap_n:                   Number of bootstrap resamples for percentile/
                                        BCa CIs on Cohen's d and confidence-delta mean.

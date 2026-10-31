@@ -82,7 +82,8 @@ class TestSRM:
 
     def test_zero_n(self):
         out = srm_check(0, 0)
-        assert out["srm_detected"] is False
+        assert out["applicable"] is False and out["srm_detected"] is None
+        assert np.isnan(out["p_value"])
 
 
 # ---------------------------------------------------------------------------
@@ -279,10 +280,22 @@ def test_power_that_cannot_be_computed_is_not_adequate():
 # ---------------------------------------------------------------------------
 
 class TestComputeAllMetrics:
-    def test_srm_present(self, ab_df_classification):
-        out = compute_all_metrics(ab_df_classification)
-        assert "srm" in out
-        assert out["srm"]["srm_detected"] is False
+    def test_srm_is_not_applicable_to_a_paired_evaluation(self, ab_df_classification):
+        # It used to run on a fabricated n // 2 split, which always passed.
+        srm = compute_all_metrics(ab_df_classification)["srm"]
+        assert srm["applicable"] is False and srm["srm_detected"] is None
+        assert "'arm'" in srm["reason"]
+
+    def test_srm_with_a_valid_arm_column(self, ab_df_classification):
+        arms = np.where(np.arange(len(ab_df_classification)) < 300, "a", "b")   # 300 / 200
+        srm = compute_all_metrics(ab_df_classification.assign(arm=arms))["srm"]
+        assert srm["applicable"] is True and (srm["n_a"], srm["n_b"]) == (300, 200)
+        assert srm["srm_detected"] is True       # p = 7.7e-6 against 50/50
+
+    def test_srm_rejects_unknown_arm_values(self, ab_df_classification):
+        arms = np.where(np.arange(len(ab_df_classification)) < 250, "A", "B")
+        srm = compute_all_metrics(ab_df_classification.assign(arm=arms))["srm"]
+        assert srm["applicable"] is False and "'a' or 'b'" in srm["reason"]
 
     def test_per_class_mcnemar_with_correction(self, ab_df_classification):
         out = compute_all_metrics(

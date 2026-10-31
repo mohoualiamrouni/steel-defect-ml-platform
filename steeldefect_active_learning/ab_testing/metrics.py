@@ -443,21 +443,20 @@ def srm_check(
         threshold:       p-value cutoff below which SRM is flagged.
 
     Returns:
-        Dict with: n_a, n_b, expected_ratio, observed_ratio_a, chi2, p_value,
-        srm_detected (True ⇒ refuse to publish results).
+        Dict with: applicable, n_a, n_b, expected_ratio, observed_ratio_a, chi2,
+        p_value, and srm_detected (True when the observed split departs from
+        expected_ratio; a diagnostic, nothing refuses results on it). Without any
+        row the check is not applicable: srm_detected is None and the numbers NaN.
     """
     from scipy import stats
     n = n_a + n_b
     if n == 0:
-        return {
-            "n_a": 0, "n_b": 0, "expected_ratio": expected_ratio,
-            "observed_ratio_a": float("nan"), "chi2": float("nan"),
-            "p_value": 1.0, "srm_detected": False,
-        }
+        return _srm_not_applicable("no rows", expected_ratio)
     observed = np.array([n_a, n_b], dtype=float)
     expected = np.array([n * expected_ratio, n * (1 - expected_ratio)], dtype=float)
     chi2, p_value = stats.chisquare(observed, f_exp=expected)
     return {
+        "applicable":       True,
         "n_a":              int(n_a),
         "n_b":              int(n_b),
         "expected_ratio":   float(expected_ratio),
@@ -466,6 +465,27 @@ def srm_check(
         "p_value":          float(p_value),
         "srm_detected":     bool(p_value < threshold),
     }
+
+
+def _srm_not_applicable(reason: str, expected_ratio: float) -> Dict:
+    nan = float("nan")
+    return {"applicable": False, "reason": reason, "srm_detected": None, "n_a": nan,
+            "n_b": nan, "expected_ratio": float(expected_ratio), "observed_ratio_a": nan,
+            "chi2": nan, "p_value": nan}
+
+
+def _srm_block(df: pd.DataFrame, expected_ratio: float, threshold: float) -> Dict:
+    """SRM from an 'arm' column; not applicable to a paired evaluation, which has none."""
+    if "arm" not in df.columns:
+        return _srm_not_applicable("paired evaluation: no 'arm' column", expected_ratio)
+    arms = df["arm"]
+    if arms.isna().any() or not set(arms.unique()) <= {"a", "b"}:
+        found = sorted(map(str, arms.dropna().unique()))[:5]
+        return _srm_not_applicable(f"'arm' values must be exactly 'a' or 'b', none missing; "
+                                   f"found {found} and {int(arms.isna().sum())} missing",
+                                   expected_ratio)
+    n_a = int(arms.eq("a").sum())
+    return srm_check(n_a, len(df) - n_a, expected_ratio=expected_ratio, threshold=threshold)
 
 
 # ---------------------------------------------------------------------------
@@ -795,7 +815,8 @@ def compute_all_metrics(
         Nested dict:
             "paired_counts":     validated 2x2 counts, overall and per class (gate input)
             "diagnostic_errors": [{"block", "error"}] for the blocks that failed
-            "srm":               sample-ratio-mismatch χ² check
+            "srm":               sample-ratio-mismatch χ² check, applicable only with an
+                                 'arm' column (a traffic split, which the gate refuses)
             "disagreement":      disagreement rate + n
             "delta":             confidence-delta summary
             "statistical":       Welch / Mann-Whitney + Cohen's d (+ Hedges)
@@ -825,13 +846,7 @@ def compute_all_metrics(
             return
         out[name] = value
 
-    def srm() -> Dict:
-        n_total = len(df)
-        n_arm_a = int(df["arm"].eq("a").sum()) if "arm" in df.columns else n_total // 2
-        return srm_check(n_arm_a, n_total - n_arm_a, expected_ratio=expected_ratio,
-                         threshold=srm_threshold)
-
-    run("srm", srm)
+    run("srm", lambda: _srm_block(df, expected_ratio, srm_threshold))
     run("disagreement", lambda: {"rate": disagreement_rate(df), "n": len(df)})
     run("delta", lambda: confidence_delta_summary(df))
     run("statistical", lambda: statistical_significance_test(df, alpha=alpha))
