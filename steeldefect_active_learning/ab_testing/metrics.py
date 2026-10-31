@@ -1,13 +1,13 @@
 """
-A/B testing metrics, statistical significance, and visualisation.
+A/B testing metrics, statistical tests and visualisation.
 
-Implements the 5-step decision cascade described in example-report.tex §3:
-    1. Shapiro-Wilk normality check on paired confidence distributions
-    2. Welch's t-test (parametric) or Mann-Whitney U (non-parametric fallback)
-    3. McNemar's test on paired classifications (Yates / exact binomial)
-    4. Cohen's d with Hedges' small-sample correction J(ν) = 1 − 3/(4ν−1)
-    5. Family-wise / FDR correction across the 28 defect classes
-       (Bonferroni | Holm | Benjamini-Hochberg)
+``compute_all_metrics`` first builds the validated paired counts
+(``paired.paired_counts``), the only input of the promotion gate
+(``promotion.decide_promotion``). Every other block is a diagnostic that the gate does
+not read: Shapiro-Wilk then Welch t or Mann-Whitney U on the confidences, the two-sided
+McNemar test overall and per class with a Bonferroni, Holm or Benjamini-Hochberg
+correction across the 11 P1 classes, Cohen's d with Hedges' correction, SRM (frames with
+an 'arm' column only), power, bootstrap, Bayesian, sequential and CUPED blocks.
 
 Classic metrics:
     disagreement_rate         — % of images where Model A and Model B disagree
@@ -15,29 +15,30 @@ Classic metrics:
     per_class_agreement       — agreement rate broken down by predicted class
 
 Advanced metrics:
-    confidence_by_band        — disagreement rate + entropy per confidence band
     entropy_comparison        — mean/std of prediction entropy per model
     margin_comparison         — mean margin score (top-1 minus top-2 softmax prob)
+    disagreement_by_entropy_quartile — disagreement rate per entropy quartile
 
-Statistical testing (Quin & Weyns 2023 — AutoPABS):
-    statistical_significance_test — Welch's t-test + Cohen's d (+ Hedges) effect size
-    mcnemar_test                  — paired-classifier McNemar (Yates / exact)
+Statistical testing (diagnostics):
+    statistical_significance_test — Welch's t-test or Mann-Whitney U on the confidences,
+                                    with Cohen's d (+ Hedges)
+    mcnemar_test                  — two-sided paired-classifier McNemar (Yates / exact)
     per_class_mcnemar             — per-class McNemar suite with multiple-testing correction
-    srm_check                     — sample-ratio-mismatch χ² gate (industry standard)
+    srm_check                     — sample-ratio-mismatch χ² check (traffic splits only)
     correct_pvalues               — Bonferroni / Holm / Benjamini-Hochberg
     required_sample_size          — n needed for target power/effect
-    power_analysis                — achieved power given current sample
+    power_analysis                — power at the observed effect
 
 Summary:
     compute_all_metrics       — single call returning all metrics as one dict
 
 Visualisation:
-    plot_comparison           — 4 standard diagnostic PNGs
-    plot_advanced_comparison  — 4 additional advanced PNGs
-        calibration_curve     — reliability diagram (A vs B)
-        entropy_distribution  — histogram of prediction entropy per model
-        confidence_bands      — disagreement rate per confidence band
-        margin_vs_disagreement— margin score vs disagreement scatter
+    plot_comparison             — 3 standard diagnostic PNGs: disagreement_rate,
+                                  confidence_delta_dist, per_class_agreement
+    plot_advanced_comparison    — 4 more: calibration_curve, entropy_distribution,
+                                  confidence_bands, per_class_accuracy_delta
+    plot_advanced_comparison_v2 — 4 more: kde_heatmap, violin_per_class, mcnemar_test,
+                                  disagreement_decomposition
 
 References:
     Quin & Weyns (2023) "Automating Pipelines of A/B Tests with Population

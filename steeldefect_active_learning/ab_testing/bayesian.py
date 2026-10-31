@@ -1,23 +1,32 @@
 """
-Bayesian A/B testing for the inspection model-replacement decision.
+Bayesian diagnostics for the inspection model-replacement decision.
 
-Two posterior models are exposed:
-    - Beta-Binomial for binary outcomes (e.g., per-class accuracy, agreement
-      rate). Each arm's success rate has a Beta prior; the posterior is
-      Beta(α + successes, β + failures). The decision metric is
-      P(p_B > p_A) = Pr[Beta(α_B + s_B, β_B + f_B) > Beta(α_A + s_A, β_A + f_A)],
-      computed via Monte-Carlo from the posterior.
+Three posterior models are exposed:
+    - Paired Dirichlet for accuracy (``paired_accuracy_posterior``). Both models scored
+      the same images, so the posterior is put on the four cells of the paired table:
+      with a uniform Dirichlet(1, 1, 1, 1) prior, P(acc_B > acc_A) = P(theta > 1/2)
+      with theta ~ Beta(1 + n01, 1 + n10), computed exactly; it equals 1 minus the
+      one-sided mid-p McNemar value. The credible interval and the expected losses
+      come from Dirichlet draws.
 
-    - Normal-Normal for continuous outcomes (e.g., confidence_delta). With a
+    - Beta-Binomial for two independent binomial arms (``beta_binomial_decision``).
+      Each arm's success rate has a Beta prior; the posterior is
+      Beta(α + successes, β + failures), and P(p_B > p_A) is computed via Monte-Carlo.
+      The agreement block uses it to compare the disagreement rate with the agreement
+      rate.
+
+    - Normal-Normal for continuous outcomes (e.g., the confidences). With a
       vague prior the posterior on the mean reduces to a Student-t centred at
       the sample mean — for n in the hundreds the t is essentially Gaussian,
-      so we use a Gaussian posterior with σ̂² / n variance.
+      so we use a Gaussian posterior with σ̂² / n variance; the two arms are
+      treated as independent.
 
-Both models report:
+Every block reports:
     - posterior probability P(B > A)
     - expected loss E[max(0, μ_A − μ_B)] (regret if you ship B and B is worse)
     - credible interval at the requested level
-    - decision: ship B iff P(B > A) ≥ threshold (default 0.95)
+    - a ``decision`` field (ship B iff P(B > A) ≥ threshold): a diagnostic label,
+      since the promotion gate thresholds no posterior
 
 References:
     Carpenter (2008) "Bayesian A/B testing".
