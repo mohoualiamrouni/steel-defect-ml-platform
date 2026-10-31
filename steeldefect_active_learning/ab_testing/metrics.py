@@ -887,7 +887,7 @@ def compute_all_metrics(
     def bayesian_block() -> Dict:
         from .bayesian import bayesian_summary
         return bayesian_summary(df, decision_threshold=bayesian_decision_threshold,
-                                cred_level=1.0 - alpha)
+                                cred_level=1.0 - alpha, counts=out["paired_counts"])
 
     if bayesian:
         run("bayesian", bayesian_block)

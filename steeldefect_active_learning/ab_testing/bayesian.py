@@ -28,10 +28,12 @@ References:
 from __future__ import annotations
 
 import math
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+
+from .paired import paired_counts, paired_counts_errors, posterior_b_better
 
 
 # ---------------------------------------------------------------------------
@@ -174,25 +176,77 @@ def normal_decision(
 # Convenience: Bayesian decision from an A/B DataFrame
 # ---------------------------------------------------------------------------
 
+def paired_accuracy_posterior(
+    counts: Mapping[str, Any],
+    decision_threshold: float = 0.95,
+    cred_level: float = 0.95,
+    n_samples: int = 200_000,
+    seed: Optional[int] = 0,
+) -> Dict:
+    """Posterior of acc_B - acc_A from the paired 2x2 counts.
+
+    With a uniform Dirichlet(1, 1, 1, 1) prior on the four cells, the posterior is
+    Dirichlet(1 + n11, 1 + n10, 1 + n01, 1 + n00), and
+    P(acc_B > acc_A) = P(p01 > p10) = P(theta > 1/2) with theta ~ Beta(1 + n01, 1 + n10):
+    computed exactly, it equals 1 minus the one-sided mid-p McNemar value. The credible
+    interval and the expected losses come from Dirichlet draws.
+
+    Args:
+        counts: a valid ``paired_counts`` block (``paired.paired_counts``).
+
+    Returns:
+        Dict with: model, prior, p_b_gt_a, posterior_mean_a, posterior_mean_b,
+        cred_interval_diff, expected_loss_ship_b, expected_loss_keep_a, cred_level,
+        n_samples, n_discordant, decision (a diagnostic label), decision_threshold.
+    """
+    n11, n10 = counts["both_correct"], counts["only_a_correct"]
+    n01, n00 = counts["only_b_correct"], counts["both_wrong"]
+    n = n11 + n10 + n01 + n00
+    p_b_gt_a = posterior_b_better(n10, n01)
+    draws = np.random.default_rng(seed).dirichlet([1 + n11, 1 + n10, 1 + n01, 1 + n00],
+                                                  size=n_samples)
+    diff = draws[:, 2] - draws[:, 1]          # p01 - p10 = acc_B - acc_A
+    lo, hi = _credible_interval(diff, cred_level)
+    return {
+        "model":                "dirichlet_paired",
+        "prior":                "Dirichlet(1,1,1,1) on (n11, n10, n01, n00)",
+        "p_b_gt_a":             p_b_gt_a,
+        "posterior_mean_a":     float((2 + n11 + n10) / (n + 4)),
+        "posterior_mean_b":     float((2 + n11 + n01) / (n + 4)),
+        "cred_interval_diff":   (float(lo), float(hi)),
+        "expected_loss_ship_b": float(np.mean(np.maximum(0.0, -diff))),
+        "expected_loss_keep_a": float(np.mean(np.maximum(0.0, diff))),
+        "cred_level":           float(cred_level),
+        "n_samples":            int(n_samples),
+        "n_discordant":         int(n10 + n01),
+        "decision":             "ship_b" if p_b_gt_a >= decision_threshold else "keep_a",
+        "decision_threshold":   float(decision_threshold),
+    }
+
+
 def bayesian_summary(
     df: pd.DataFrame,
     decision_threshold: float = 0.95,
     cred_level: float = 0.95,
     n_samples: int = 200_000,
     seed: Optional[int] = 0,
+    *,
+    counts: Optional[Mapping[str, Any]] = None,
 ) -> Dict:
-    """Run Beta-Binomial (agreement) and Normal (confidence) on the A/B df.
+    """Run the Bayesian diagnostic blocks on the A/B df.
 
-    Selects the model based on what columns are present:
-      - If 'agrees' is present, runs Beta-Binomial on agreement rate.
+    Selects the models based on what is available:
+      - If 'agrees' is present, runs Beta-Binomial on the agreement rate.
+      - If the paired counts are valid, runs the exact paired posterior on accuracy
+        (:func:`paired_accuracy_posterior`). ``counts`` is the ``paired_counts`` block;
+        when None it is computed from df, whose rows must then satisfy the contract
+        of ``paired.paired_counts``.
       - If 'confidence_a' / 'confidence_b' are present, runs Normal-Normal on
         the confidence difference (interpreted as B − A).
-      - If 'correct_a' / 'correct_b' (or 'pred_a','pred_b','label') are present,
-        runs Beta-Binomial on accuracy.
 
     Returns a dict with up to three sub-dicts: 'agreement', 'accuracy',
-    'confidence', each containing a full decision summary. Empty if none of
-    the required columns are present.
+    'confidence'. Their ``decision`` fields are diagnostic labels: the promotion
+    gate thresholds no posterior.
     """
     out: Dict = {}
 
@@ -211,13 +265,11 @@ def bayesian_summary(
             seed=seed,
         )
 
-    correct_a, correct_b = _resolve_correctness(df)
-    if correct_a is not None:
-        s_a, s_b = int(correct_a.sum()), int(correct_b.sum())
-        n_a = n_b = int(len(df))
-        out["accuracy"] = beta_binomial_decision(
-            successes_a=s_a, trials_a=n_a,
-            successes_b=s_b, trials_b=n_b,
+    if counts is None:
+        counts = paired_counts(df)
+    if not paired_counts_errors(counts):
+        out["accuracy"] = paired_accuracy_posterior(
+            counts,
             decision_threshold=decision_threshold,
             cred_level=cred_level,
             n_samples=n_samples,
@@ -247,15 +299,3 @@ def _credible_interval(samples: np.ndarray, level: float) -> Tuple[float, float]
     lo_q = (1.0 - level) / 2.0
     hi_q = 1.0 - lo_q
     return float(np.quantile(samples, lo_q)), float(np.quantile(samples, hi_q))
-
-
-def _resolve_correctness(df: pd.DataFrame):
-    """Same logic as metrics._resolve_correctness — duplicated to avoid an
-    import cycle when this module is loaded standalone in notebooks."""
-    if "correct_a" in df.columns and "correct_b" in df.columns:
-        return df["correct_a"].astype(bool).values, df["correct_b"].astype(bool).values
-    if "pred_a" in df.columns and "pred_b" in df.columns and "label" in df.columns:
-        ca = (df["pred_a"].values == df["label"].values).astype(bool)
-        cb = (df["pred_b"].values == df["label"].values).astype(bool)
-        return ca, cb
-    return None, None
