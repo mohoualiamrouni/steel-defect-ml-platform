@@ -11,11 +11,16 @@ Usage:
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import os
 from dataclasses import dataclass, field
-from typing import Any, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Union
 import yaml
+
+# The YAML shipped with the package, next to this module.
+SHIPPED_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "config", "pipeline_config.yaml")
 
 
 # ---------------------------------------------------------------------------
@@ -63,49 +68,76 @@ class ActiveLearningConfig:
 class PromotionConfig:
     """Thresholds of the A/B promotion gate (``ab_testing.promotion.decide_promotion``).
 
+    Field names are the keyword arguments of ``decide_promotion``; the gate's level is
+    ``ab_testing.alpha``. None for expected_classes or class_prior means not configured:
+    the gate keeps A.
+
     Attributes:
-        min_cohens_d:         Minimum |Cohen's d| for the difference to count.
-        bayesian_threshold:   Minimum Bayesian P(B more accurate than A).
-        no_class_regression:  Veto promotion if any class significantly regresses.
+        min_gain:                    Superiority: the lower bound of acc_B - acc_A at the
+                                     class prior must exceed it.
+        noninferiority_margin:       Default per-class margin m: a class passes when the
+                                     lower bound of recall_B - recall_A exceeds -m.
+        class_margins:               Per-class margins, by class id.
+        expected_classes:            The class taxonomy; a class absent from the slice fails.
+        class_prior:                 Deployment class shares (renormalised), or "slice" to
+                                     certify the slice's own class mix.
+        false_alarm_margin:          Veto a class when B adds false alarms into it, at level
+                                     alpha, beyond this rate; null disables the clause.
+        class_false_alarm_margins:   Per-class false-alarm margins.
+        min_detectable_gain:         Plan: the gain (accuracy units) the superiority clause
+                                     must detect.
+        planning_discordance:        Plan: the assumed share of images on which exactly one
+                                     model is right.
+        power:                       Plan: power of the superiority clause, and of all the
+                                     per-class clauses together.
+        require_no_class_regression: Enforce the per-class clause.
     """
-    min_cohens_d: float = 0.2
-    bayesian_threshold: float = 0.95
-    no_class_regression: bool = True
+    min_gain: float = 0.0
+    noninferiority_margin: float = 0.05
+    class_margins: Dict[Union[int, str], float] = field(default_factory=dict)
+    expected_classes: Optional[List[Union[int, str]]] = None
+    class_prior: Optional[Union[str, Dict[Union[int, str], float]]] = None
+    false_alarm_margin: Optional[float] = 0.005
+    class_false_alarm_margins: Dict[Union[int, str], float] = field(default_factory=dict)
+    min_detectable_gain: float = 0.02
+    planning_discordance: float = 0.10
+    power: float = 0.80
+    require_no_class_regression: bool = True
 
 
 @dataclass
 class ABTestingConfig:
-    """Statistical A/B-testing configuration (cascade in example-report.tex §3).
+    """Statistical A/B configuration: the diagnostic cascade (``metrics.compute_all_metrics``)
+    and the promotion gate (``promotion``).
 
     Attributes:
         enabled:                       Run the A/B-testing pipeline.
         iou_threshold:                 IoU threshold for segmentation agreement.
-        confidence_threshold:          Min confidence to count a prediction.
+        confidence_threshold:          Not implemented: forwarded to run_ab_comparison,
+                                       which ignores it.
         demo_predictions_path:         CSV used when checkpoints are null (avoids
                                        degenerate 100% disagreement on random weights).
-        alpha:                         Significance level (default 0.05).
-        power:                         Target statistical power (default 0.80).
-        mde:                           Minimum detectable effect for sample-size
-                                       calculations (default 0.05).
+        alpha:                         One-sided level of the promotion gate and level of
+                                       the diagnostic tests, in (0, 0.5).
         multiple_testing_correction:   "bonferroni" | "holm" | "benjamini-hochberg"
-                                       | "none". Applied across the per-class McNemar
-                                       suite (28 defect classes) — closes the gap
-                                       where this YAML key was previously ignored.
-        srm_threshold:                 χ² p-value below which the SRM gate flips and
-                                       results are refused (default 1e-3).
+                                       | "none". Correction across the diagnostic
+                                       per-class McNemar suite (11 classes in P1); the
+                                       gate's per-class clause is an intersection-union
+                                       test and needs none.
+        srm_threshold:                 χ² p-value below which the diagnostic SRM check
+                                       flags a mismatch. Nothing refuses results on it.
         expected_arm_ratio:            Expected fraction in arm A (default 0.5).
         bootstrap_n:                   Number of bootstrap resamples for percentile/
                                        BCa CIs on Cohen's d and confidence-delta mean.
         cuped_covariate:               Column name to use as the CUPED covariate. None
                                        disables variance reduction. The covariate must
                                        be pre-treatment (e.g., previous-batch confidence).
-        sequential:                    "msprt" | "obrien_fleming" | None. Enables
-                                       always-valid sequential testing for continuous
-                                       monitoring (Johari et al. 2017).
-        bayesian_decision_threshold:   P(B > A) cutoff for ship/no-ship in the Bayesian
-                                       layer (default 0.95).
-        calibrate_before_comparison:   Temperature-scale both models before comparing
-                                       (Minderer 2021).
+        sequential:                    "msprt" | "obrien_fleming" | None. Adds the
+                                       sequential diagnostic block (Johari et al. 2017);
+                                       the gate does not read it.
+        bayesian_decision_threshold:   Threshold of the diagnostic Bayesian blocks'
+                                       ``decision`` field; the gate thresholds no posterior.
+        calibrate_before_comparison:   Not implemented: read by no code.
         promotion:                     Thresholds of the promotion gate (nested section).
     """
     enabled: bool = True
@@ -113,8 +145,6 @@ class ABTestingConfig:
     confidence_threshold: float = 0.5
     demo_predictions_path: Optional[str] = None
     alpha: float = 0.05
-    power: float = 0.80
-    mde: float = 0.05
     multiple_testing_correction: str = "benjamini-hochberg"
     srm_threshold: float = 1e-3
     expected_arm_ratio: float = 0.5
@@ -124,6 +154,10 @@ class ABTestingConfig:
     bayesian_decision_threshold: float = 0.95
     calibrate_before_comparison: bool = False
     promotion: PromotionConfig = field(default_factory=PromotionConfig)
+
+    def gate_kwargs(self) -> Dict[str, Any]:
+        """The keyword arguments of ``decide_promotion``: the gate's only config mapping."""
+        return {"alpha": self.alpha, **dataclasses.asdict(self.promotion)}
 
 
 @dataclass
@@ -339,6 +373,30 @@ def check_gate_thresholds(
 # experiment-only sections that are not part of the typed pipeline config).
 _KNOWN_TOPLEVEL_EXTRA_KEYS = {"flatness_clustering"}
 
+# Keys of the first promotion gate, under ab_testing, with what replaces each one.
+_RETIRED_KEYS = {
+    ("power",): "moved to ab_testing.promotion.power",
+    ("mde",): "moved to ab_testing.promotion.min_detectable_gain (accuracy units)",
+    ("promotion", "min_cohens_d"): "removed: model confidence is no longer a criterion",
+    ("promotion", "bayesian_threshold"): "removed: the gate reports the posterior and "
+                                         "thresholds none",
+    ("promotion", "no_class_regression"): "renamed ab_testing.promotion."
+                                          "require_no_class_regression",
+}
+
+
+def _check_retired_keys(raw: dict) -> None:
+    """Fail once, naming every retired key of the YAML and its replacement."""
+    found = []
+    for path, replacement in _RETIRED_KEYS.items():
+        node = raw.get("ab_testing")
+        for key in path[:-1]:
+            node = node.get(key) if isinstance(node, dict) else None
+        if isinstance(node, dict) and path[-1] in node:
+            found.append(f"ab_testing.{'.'.join(path)}: {replacement}")
+    if found:
+        raise ValueError("Retired YAML key(s): " + "; ".join(found))
+
 
 def _dict_to_dataclass(cls, d: dict, *, _path: str = ""):
     """Recursively populate a dataclass from a dict.
@@ -365,10 +423,7 @@ def _validate(cfg: PipelineConfig) -> None:
     (no Pydantic).
     """
     ab = cfg.ab_testing
-    if not (0.0 < ab.alpha < 1.0):
-        raise ValueError(f"ab_testing.alpha must be in (0,1), got {ab.alpha!r}")
-    if not (0.0 < ab.power < 1.0):
-        raise ValueError(f"ab_testing.power must be in (0,1), got {ab.power!r}")
+    check_gate_thresholds(**ab.gate_kwargs())   # alpha and every promotion threshold
     if not (0.0 < ab.expected_arm_ratio < 1.0):
         raise ValueError(
             f"ab_testing.expected_arm_ratio must be in (0,1), got {ab.expected_arm_ratio!r}"
@@ -392,16 +447,6 @@ def _validate(cfg: PipelineConfig) -> None:
         raise ValueError(
             "ab_testing.bayesian_decision_threshold must be in (0,1), got "
             f"{ab.bayesian_decision_threshold!r}"
-        )
-    pr = ab.promotion
-    if pr.min_cohens_d < 0:
-        raise ValueError(
-            f"ab_testing.promotion.min_cohens_d must be >= 0, got {pr.min_cohens_d!r}"
-        )
-    if not (0.0 < pr.bayesian_threshold < 1.0):
-        raise ValueError(
-            "ab_testing.promotion.bayesian_threshold must be in (0,1), got "
-            f"{pr.bayesian_threshold!r}"
         )
     if cfg.anomaly.detector not in {"patchcore", "padim"}:
         raise ValueError(
@@ -441,6 +486,7 @@ def load_config(path: str) -> PipelineConfig:
     with open(path, "r") as f:
         raw = yaml.safe_load(f) or {}
 
+    _check_retired_keys(raw)
     known_top = {f.name for f in PipelineConfig.__dataclass_fields__.values()} \
                 | _KNOWN_TOPLEVEL_EXTRA_KEYS
     unknown_top = set(raw) - known_top
