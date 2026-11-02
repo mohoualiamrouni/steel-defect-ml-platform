@@ -78,7 +78,9 @@ class PromotionConfig:
         noninferiority_margin:       Default per-class margin m: a class passes when the
                                      lower bound of recall_B - recall_A exceeds -m.
         class_margins:               Per-class margins, by class id.
-        expected_classes:            The class taxonomy; a class absent from the slice fails.
+        expected_classes:            The class taxonomy. A class absent from the slice fails
+                                     no_class_regression, and leaves the prior-weighted
+                                     estimand not estimable when its prior share is positive.
         class_prior:                 Deployment class shares (renormalised), or "slice" to
                                      certify the slice's own class mix.
         false_alarm_margin:          Veto a class when B adds false alarms into it, at level
@@ -88,8 +90,9 @@ class PromotionConfig:
                                      must detect.
         planning_discordance:        Plan: the assumed share of images on which exactly one
                                      model is right.
-        power:                       Plan: power of the superiority clause, and of all the
-                                     per-class clauses together.
+        power:                       Plan: power of the superiority clause (enforced by
+                                     sample_size), and of all the per-class clauses together
+                                     (their planned sizes are only warned about).
         require_no_class_regression: Enforce the per-class clause.
     """
     min_gain: float = 0.0
@@ -118,7 +121,9 @@ class ABTestingConfig:
         demo_predictions_path:         CSV used when checkpoints are null (avoids
                                        degenerate 100% disagreement on random weights).
         alpha:                         One-sided level of the promotion gate and level of
-                                       the diagnostic tests, in (0, 0.5).
+                                       the diagnostic tests, in [0.025, 0.5): below 0.025,
+                                       the exact size of the gate's superiority clause
+                                       exceeds alpha (1.12 alpha at 0.01).
         multiple_testing_correction:   "bonferroni" | "holm" | "benjamini-hochberg"
                                        | "none". Correction across the diagnostic
                                        per-class McNemar suite (11 classes in P1); the
@@ -313,8 +318,9 @@ def check_gate_thresholds(
     then keeps A.
     """
     p = "ab_testing.promotion."
-    if not (_is_number(alpha) and 0.0 < alpha < 0.5):
-        raise ValueError(f"ab_testing.alpha must be a number in (0, 0.5), got {alpha!r}")
+    if not (_is_number(alpha) and 0.025 <= alpha < 0.5):
+        raise ValueError(f"ab_testing.alpha must be a number in [0.025, 0.5), got {alpha!r}: "
+                         f"below 0.025 the exact size of the superiority clause exceeds alpha")
     if not (_is_number(min_gain) and 0.0 <= min_gain < 1.0):
         raise ValueError(f"{p}min_gain must be a number in [0, 1), got {min_gain!r}")
     if not (_is_number(noninferiority_margin) and 0.0 < noninferiority_margin < 1.0):
@@ -344,11 +350,14 @@ def check_gate_thresholds(
         if not isinstance(class_prior, Mapping):
             raise ValueError(f"{p}class_prior must be null, 'slice' or a mapping of class "
                              f"shares, got {class_prior!r}")
-        if expected_classes is None or set(class_prior) != set(expected_classes):
-            raise ValueError(f"{p}class_prior keys must be exactly expected_classes")
+        if (expected_classes is None or not all(_is_class_id(k) for k in class_prior)
+                or set(class_prior) != set(expected_classes)):
+            raise ValueError(f"{p}class_prior keys must be exactly expected_classes (int or "
+                             f"str class ids)")
         values = list(class_prior.values())
-        if not all(_is_number(v) and v >= 0 for v in values) or sum(values) <= 0:
-            raise ValueError(f"{p}class_prior shares must be numbers >= 0 with a positive sum")
+        if not all(_is_number(v) and v >= 0 for v in values) or not 0 < sum(values) < math.inf:
+            raise ValueError(f"{p}class_prior shares must be numbers >= 0 with a positive, "
+                             f"finite sum")
     if false_alarm_margin is not None and not (_is_number(false_alarm_margin)
                                                and 0.0 < false_alarm_margin < 1.0):
         raise ValueError(f"{p}false_alarm_margin must be null or a number in (0, 1), "

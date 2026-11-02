@@ -177,7 +177,12 @@ def test_unknown_promotion_key_raises(tmp_path):
     ({"false_alarm_margin": 1.0}, "false_alarm_margin"),
     ({"min_detectable_gain": 0.0}, "min_detectable_gain"),
     ({"planning_discordance": 0.01}, "planning_discordance"),
+    ({"planning_discordance": 1.5}, "planning_discordance"),
     ({"power": 0.3}, "power"),
+    ({"power": 1.0}, "power"),
+    ({"expected_classes": list(range(11)), "class_prior": {k: 0.0 for k in range(11)}},
+     "class_prior"),
+    ({"expected_classes": [0, "1"]}, "expected_classes"),
     ({"require_no_class_regression": 1}, "require_no_class_regression"),
 ])
 def test_promotion_ranges(tmp_path, promotion, key):
@@ -187,9 +192,15 @@ def test_promotion_ranges(tmp_path, promotion, key):
         load_config(str(cfg_path))
 
 
-def test_alpha_must_be_below_half(tmp_path):
-    with pytest.raises(ValueError, match="alpha"):
-        load_config(str(_write(tmp_path, "ab_testing:\n  alpha: 0.5\n")))
+@pytest.mark.parametrize("alpha", [0.5, 0.02, 0.01])
+def test_alpha_must_lie_in_the_checked_range(tmp_path, alpha):
+    # Below 0.025 the exact size of the superiority clause exceeds alpha (1.12 alpha at 0.01).
+    with pytest.raises(ValueError, match=r"ab_testing\.alpha must be a number in \[0\.025, 0\.5\)"):
+        load_config(str(_write(tmp_path, f"ab_testing:\n  alpha: {alpha}\n")))
+
+
+def test_alpha_at_the_bottom_of_the_range_loads(tmp_path):
+    assert load_config(str(_write(tmp_path, "ab_testing:\n  alpha: 0.025\n"))).ab_testing.alpha == 0.025
 
 
 def test_invalid_anomaly_detector_raises(tmp_path):

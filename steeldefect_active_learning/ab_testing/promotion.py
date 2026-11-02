@@ -26,8 +26,12 @@ for which one of these claims is false is at most the largest clause size. At
 alpha = 0.05 that size stayed at or below 0.05 in every configuration checked with up to
 40 % of the images discordant (exact enumeration for the per-class and slice bounds,
 simulation for the prior-weighted bound), and reached 0.0503 only when every image is
-discordant. Missing or invalid evidence fails its criterion. Model confidence plays no
-part.
+discordant. alpha must lie in [0.025, 0.5): below 0.025, the slice bound tested above a
+positive ``min_gain`` is too skewed for the adjustment, and its exact size exceeds alpha
+(1.12 alpha at alpha = 0.01, when B never loses and gains exactly min_gain). From 0.025 to
+0.45, the exact sizes checked stayed at or below alpha, again except when every image of
+a class is discordant (up to 1.009 alpha). Missing or invalid evidence fails its
+criterion. Model confidence plays no part.
 
 The gate assumes what it cannot check: the images are independent (one per coil, or a
 cluster column with one image per cluster), the labels of the images on which A and B
@@ -101,21 +105,29 @@ def decide_promotion(
     Args:
         all_metrics:          output of ``compute_all_metrics``; only its
                               ``paired_counts`` block is read.
-        alpha:                one-sided level of every clause.
+        alpha:                one-sided level of every clause, in [0.025, 0.5).
         min_gain:             superiority: the lower bound of acc_B - acc_A must exceed it.
         noninferiority_margin, class_margins: per-class margin m_k; a class passes when the
                               lower bound of recall_B - recall_A exceeds -m_k.
-        expected_classes:     the class taxonomy; every class must be in the slice, and no
-                              label or prediction may lie outside it. None: not configured.
+        expected_classes:     the class taxonomy; no label or prediction may lie outside it.
+                              A class absent from the slice fails no_class_regression, and
+                              leaves the prior-weighted estimand not estimable when its prior
+                              share is positive. None: not configured.
         class_prior:          deployment class shares (renormalised) at which accuracy is
                               compared, or "slice" for the slice's own class mix. None: not
                               configured.
         false_alarm_margin, class_false_alarm_margins: veto a class when B adds false alarms
                               into it, at level alpha, beyond this rate; None disables it.
-        min_detectable_gain, planning_discordance, power: the prospective plan; the slice
-                              must have at least the effective size that gives ``power``
-                              against a B ``min_detectable_gain`` more accurate on every
-                              class, with ``planning_discordance`` discordant images.
+        min_detectable_gain, planning_discordance, power: the prospective plan. The slice
+                              must have at least the effective size at which the superiority
+                              clause alone reaches ``power`` against a B
+                              ``min_detectable_gain`` more accurate on every class, with
+                              ``planning_discordance`` discordant images. Each class needs its
+                              own planned size (``per_class[].n_planned``, split so that all
+                              classes together reach ``power``); those are warned about, not
+                              enforced, so the gate's power at the plan is lower: close to 0
+                              when the rare classes are as rare in the slice as in the
+                              deployment prior (a few images each).
         require_no_class_regression: enforce the per-class clause.
 
     Returns:
@@ -256,7 +268,10 @@ def decide_promotion(
             est, est_lower, est_upper = mover_bounds(
                 [r["delta"] for r in weighted], [r["lower"] for r in weighted],
                 [r["upper"] for r in weighted], [weights[r["class"]] for r in weighted])
-    n_eff = n_effective([weights[r["class"]] for r in weighted], [r["n"] for r in weighted])
+    if class_prior == "slice":
+        n_eff = float(n)    # the identity, which floating point can miss by one ulp
+    else:
+        n_eff = n_effective([weights[r["class"]] for r in weighted], [r["n"] for r in weighted])
     n_planned = planning_n(planning_discordance, min_detectable_gain, min_gain, alpha, power)
     discordance = (n10 + n01) / n
     verdict.update(n_images=n, id_col=pc.get("id_col"), counts={**{c: pc[c] for c in CELLS}, "n": n})
@@ -319,11 +334,12 @@ def decide_promotion(
             for r in failing:
                 if r["status"] == "absent":
                     details.append(f"{_label(r)}: absent")
-                elif r["status"] == "insufficient_n":
-                    details.append(f"{_label(r)}: n = {r['n']} < {r['n_floor']}")
                 else:
+                    reason = r["status"]
+                    if reason == "insufficient_n":
+                        reason += f": n = {r['n']} < zero-discordance floor {r['n_floor']}"
                     details.append(f"{_label(r)}: lower bound {r['lower']:+.3f} <= "
-                                   f"{-r['margin']:+.3f} ({r['status']})")
+                                   f"{-r['margin']:+.3f} ({reason})")
             reasons.append(_crit("no_class_regression", False,
                                  f"{len(failing)} of {n_classes} classes fail: "
                                  f"{_listed(details)}: fail"))

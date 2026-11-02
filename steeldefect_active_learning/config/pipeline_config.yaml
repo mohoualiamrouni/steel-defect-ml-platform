@@ -76,7 +76,7 @@ ab_testing:
   demo_predictions_path: "steeldefect_active_learning/data/demo_ab_predictions.csv"
   iou_threshold: 0.5                     # IoU threshold for segmentation agreement
   confidence_threshold: 0.5              # not implemented: forwarded to run_ab_comparison, which ignores it
-  alpha: 0.05                            # one-sided level of the promotion gate; also the diagnostics' level
+  alpha: 0.05                            # one-sided level of the promotion gate, in [0.025, 0.5); also the diagnostics' level
   multiple_testing_correction: "benjamini-hochberg"  # bonferroni | holm | benjamini-hochberg | none; diagnostic per-class McNemar only, the gate needs none
   srm_threshold: 1.0e-3                  # diagnostic SRM, computed only with an 'arm' column (the paired gate refuses such frames)
   expected_arm_ratio: 0.5                # expected fraction of arm A for that diagnostic
@@ -90,7 +90,7 @@ ab_testing:
     min_gain: 0.0                        # superiority: lower bound of acc_B - acc_A at class_prior must exceed this
     noninferiority_margin: 0.05          # every class: lower bound of acc_B,k - acc_A,k must exceed -0.05
     class_margins: {3: 0.03, 5: 0.03, 8: 0.03}   # edge_crack, coil_break, sliver: policy placeholder for the plant to set
-    expected_classes: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]   # the 11 P1 class ids; an absent class fails
+    expected_classes: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]   # the 11 P1 class ids; an absent class fails no_class_regression
     # deployment class shares (normalised by the gate): the calibrated-synthetic stream prior of
     # data/generate_sample_data.py (STEELDEFECT_CLASS_PRIOR); "slice" = the slice's own class mix
     class_prior: {0: 0.118, 1: 0.031, 2: 0.018, 3: 0.0061, 4: 0.024, 5: 0.0025, 6: 0.043, 7: 0.071, 8: 0.0039, 9: 0.0125, 10: 0.610}
@@ -98,7 +98,7 @@ ab_testing:
     class_false_alarm_margins: {3: 0.002, 5: 0.002, 8: 0.002}   # rare structural classes: policy placeholder
     min_detectable_gain: 0.02            # plan: gain the superiority clause must detect (accuracy units)
     planning_discordance: 0.10           # plan: assumed share of images on which exactly one model is right
-    power: 0.80                          # plan: power of the superiority clause, and of all per-class clauses together
+    power: 0.80                          # plan: power of the superiority clause (enforced by sample_size), and of all per-class clauses together (only warned about)
     require_no_class_regression: true    # enforce the per-class non-inferiority clause
 
 # ─── Reproducibility & observability ─────────────────────────────────────────

@@ -244,6 +244,61 @@ def test_noninferiority_floor(margin, cc, floor):
     assert paired.score_lower_bound(0, 0, floor, 0.05, cc=cc) > -margin
 
 
+@pytest.mark.parametrize("margin, alpha, floor", [
+    (0.05, 0.025, 110), (0.03, 0.025, 185), (0.05, 0.01, 140), (0.03, 0.01, 237),
+])
+def test_noninferiority_floor_at_other_levels(margin, alpha, floor):
+    assert paired.noninferiority_floor(margin, alpha) == floor
+    assert paired.score_lower_bound(0, 0, floor - 1, alpha) <= -margin
+    assert paired.score_lower_bound(0, 0, floor, alpha) > -margin
+
+
+@pytest.mark.parametrize("alpha", [0.0, -0.1, 0.6, 1.0])
+def test_bounds_need_a_one_sided_level(alpha):
+    # The bound search assumes z_(1-alpha) >= 0; above 0.5 it returned its bracket's end.
+    for call in (lambda: paired.score_lower_bound(3, 9, 32, alpha),
+                 lambda: paired.score_upper_bound(3, 9, 32, alpha),
+                 lambda: paired.noninferiority_floor(0.05, alpha),
+                 lambda: paired.planning_n(0.10, 0.02, 0.0, alpha, 0.80)):
+        with pytest.raises(ValueError, match="alpha must be in"):
+            call()
+    assert paired.score_lower_bound(3, 9, 32, 0.5) == pytest.approx(5 / 32, abs=1e-12)
+
+
+def _first_promoting_count(n: int, gain: float, alpha: float) -> int:
+    """Smallest n01 at n10 = 0 that passes both halves of the superiority clause."""
+    def passes(n01: int) -> bool:
+        return (paired.score_lower_bound(0, n01, n, alpha) > gain
+                and paired.mcnemar_one_sided_p(0, n01) < alpha)
+    lo, hi = 0, n
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if passes(mid):
+            hi = mid
+        else:
+            lo = mid + 1
+    return lo
+
+
+def _superiority_size(n: int, gain: float, alpha: float) -> float:
+    # Worst null found: B never loses and gains exactly min_gain (p10 = 0, p01 = gain).
+    return float(stats.binom.sf(_first_promoting_count(n, gain, alpha) - 1, n, gain))
+
+
+def test_superiority_size_at_the_smallest_alpha():
+    sizes = [_superiority_size(n, g, 0.025)
+             for g in (0.005, 0.01, 0.02, 0.05) for n in range(100, 6001, 211)]
+    assert max(sizes) <= 0.025
+    assert max(sizes) > 0.9 * 0.025      # the grid reaches the worst cases
+
+
+def test_superiority_size_exceeds_alpha_below_the_range():
+    # Why alpha >= 0.025: at 0.01 the exact size reaches 1.116 alpha (n = 832, gain 0.01:
+    # n01 = 16 passes, Z = 2.32754 > z = 2.32635; P(Bin(832, 0.01) >= 16) in exact rationals).
+    assert _first_promoting_count(832, 0.01, 0.01) == 16
+    assert _superiority_size(832, 0.01, 0.01) == pytest.approx(0.011157954115420666, rel=1e-9)
+
+
 # ---------------------------------------------------------------------------
 # Planning, weighted difference
 # ---------------------------------------------------------------------------

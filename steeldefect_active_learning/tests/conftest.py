@@ -56,6 +56,31 @@ def ab_df_classification(rng):
 
 
 @pytest.fixture
+def ab_df_paired_null(rng):
+    """A paired null for correctness: A and B equally accurate on the same images.
+
+    2,200 images, 200 per class over 11 classes. A and B are each right on about 85 % of
+    the images, with independent errors, so about a quarter of the images are discordant
+    and neither model is better.
+    """
+    n_per_class, n_classes = 200, 11
+    labels = np.repeat(np.arange(n_classes), n_per_class)
+    n = len(labels)
+    preds = []
+    for _ in range(2):
+        pred = labels.copy()
+        wrong = rng.random(n) < 0.15
+        pred[wrong] = (pred[wrong] + rng.integers(1, n_classes, size=int(wrong.sum()))) % n_classes
+        preds.append(pred)
+    return pd.DataFrame({
+        "image_path": [f"img_{i:05d}.png" for i in range(n)],
+        "label":      labels,
+        "pred_a":     preds[0],
+        "pred_b":     preds[1],
+    })
+
+
+@pytest.fixture
 def ab_df_balanced(rng):
     """A/B df that is a null case only for the confidence columns.
 

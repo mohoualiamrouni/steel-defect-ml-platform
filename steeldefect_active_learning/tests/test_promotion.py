@@ -125,15 +125,76 @@ def _fixture_frame() -> pd.DataFrame:
                          "label": labels, "pred_a": pred_a, "pred_b": pred_b})
 
 
+def _mcnemar_tables() -> Dict[int, Tuple[int, int, int, int]]:
+    """B loses 106 images to A and wins 100 on the slice, but wins on clean, at the prior."""
+    tables = {k: (360, 12, 4, 24) for k in (0, 1, 2, 4, 6, 7, 9)}
+    tables.update({k: (368, 4, 4, 24) for k in (3, 5, 8)})
+    tables[10] = (1880, 10, 60, 50)
+    return tables
+
+
+def _uneven_1544_tables() -> Dict[int, Tuple[int, int, int, int]]:
+    """1,544 images split [54, 169, 565, 375, 302, 79]: n_effective(n_k / n) = n - 2e-13.
+
+    In each class B fixes half of A's errors (15 % of the images) and breaks none.
+    """
+    tables = {}
+    for k, nk in enumerate([54, 169, 565, 375, 302, 79]):
+        errors_a = round(0.15 * nk)
+        tables[k] = (nk - errors_a, 0, errors_a // 2, errors_a - errors_a // 2)
+    return tables
+
+
+def _alarm_margin_frame() -> pd.DataFrame:
+    """B's 2 new errors per class all predict coil_break: 20 more alarms on 3,000 images."""
+    tables = {5: (100, 0, 0, 0), **{k: (268, 2, 20, 10) for k in [0, 1, 2, 3, 4, 6, 7, 8, 9, 10]}}
+    return frame_from_tables(tables, wrong_a=_skip_coil_break, wrong_b=lambda k: 5)
+
+
+def _alpha_tables() -> Dict[int, Tuple[int, int, int, int]]:
+    """Promoted at alpha 0.05; at 0.025 the scratch bound falls just below its margin."""
+    tables = {k: (480, 6, 72, 42) for k in range(1, 10)}
+    tables[0] = (500, 30, 15, 55)
+    tables[10] = (2900, 20, 200, 80)
+    return tables
+
+
+def _one_class_frame() -> pd.DataFrame:
+    return pd.DataFrame({"image_path": [f"img_{j:04d}.png" for j in range(400)],
+                         "label": 0, "pred_a": 0, "pred_b": 0})
+
+
 F2_BASE = {10: (1319, 0, 60, 121), **{k: (80, 0, 0, 20) for k in [0, 1, 2, 3, 4, 6, 7, 8, 9]}}
 SIX = {**SHIPPED, "expected_classes": list(range(6)), "class_prior": "slice",
        "class_margins": {}, "class_false_alarm_margins": {}}
+ONE = {**SHIPPED, "expected_classes": [0], "class_prior": "slice", "class_margins": {},
+       "class_false_alarm_margins": {}}
 
 # (scenario, frame, thresholds, decision, conclusion, failing criteria, key values)
 SCENARIOS = [
     ("the demo at its own class mix", lambda: pd.read_csv(DEMO), {**SLICE, "class_margins": {}},
      "keep_A", "inconclusive", ["sample_size", "superiority", "no_class_regression"],
-     {"delta_lower": -0.006473660240595499, "n_effective": 1100.0}),
+     {"delta_lower": -0.006473660240595499, "n_effective": 1100.0,
+      "p_b_better_posterior": 0.9028907029671362, "estimand_delta": 0.02090909090909091,
+      "acc_a": 0.8163636363636364, "acc_b": 0.8372727272727273,
+      "per_class_power": 0.9799185947080309}),
+    ("worse on the slice, better at the prior: McNemar decides",
+     lambda: frame_from_tables(_mcnemar_tables()), SHIPPED, "keep_A", "inconclusive",
+     ["superiority"], {"mcnemar_p_one_sided": 0.6870697102498966,
+                       "estimand_lower": 0.0037755822456655205}),
+    ("exactly n_planned images, split unevenly",
+     lambda: frame_from_tables(_uneven_1544_tables(), n_classes=6), SIX, "promote_B",
+     "promote_B", [], {"n_effective": 1544.0, "n_planned": 1544}),
+    ("20 new coil_break alarms: its 0.002 margin vetoes", _alarm_margin_frame,
+     {**SLICE, "class_margins": {}}, "keep_A", "evidence_against_B",
+     ["no_false_alarm_increase"], {}),
+    ("the same alarms at the default 0.005 margin", _alarm_margin_frame,
+     {**SLICE, "class_margins": {}, "class_false_alarm_margins": {3: 0.002, 8: 0.002}},
+     "promote_B", "promote_B", [], {}),
+    ("planning discordance equal to the planned gain", promote_frame,
+     {**SHIPPED, "planning_discordance": 0.02}, "promote_B", "promote_B", [], {"n_planned": 308}),
+    ("a one-class taxonomy", _one_class_frame, ONE, "keep_A", "inconclusive",
+     ["sample_size", "superiority"], {"n_effective": 400.0}),
     ("F10: B fixes 264 errors, breaks none", lambda: frame_from_tables(_f10_tables(44), n_classes=6),
      SIX, "promote_B", "promote_B", [],
      {"mcnemar_p_one_sided": 3.3735033418337674e-80, "delta_lower": 0.11956656692836817,
@@ -200,7 +261,59 @@ def test_demo_slice_cannot_promote_by_design():
     assert v["estimates"]["mcnemar_p_one_sided"] == pytest.approx(0.10680621141867858)
     assert v["vetoed_classes"] == []
     details = {r["criterion"]: r["detail"] for r in v["reasons"]}
-    assert "coil_break: n = 100 < 147" in details["no_class_regression"]
+    assert ("coil_break: lower bound -0.090 <= -0.030 (insufficient_n: n = 100 < "
+            "zero-discordance floor 147)") in details["no_class_regression"]
+    rows = {r["class"]: r for r in v["per_class"]}
+    assert [rows[k]["n_planned"] for k in range(11)] == [306, 306, 306, 573, 306, 573, 306, 306,
+                                                         573, 306, 306]
+    assert rows[0]["weight"] == pytest.approx(0.118 / 0.94, rel=1e-12)
+    assert sum(r["weight"] for r in v["per_class"]) == pytest.approx(1.0, rel=1e-12)
+
+
+def test_demo_warnings_at_its_own_class_mix():
+    v = verdict_of(pd.read_csv(DEMO), **{**SLICE, "class_margins": {}})
+    assert v["warnings"] == [
+        "observed discordance 0.2845 exceeds planning_discordance 0.1: the slice is less "
+        "powerful than planned",
+        "classes below their planned size: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]",
+        "estimand: the slice's own class mix (class_prior='slice')"]
+    assert {r["n_planned"] for r in v["per_class"]} == {306}
+
+
+def test_alpha_reaches_every_bound():
+    df = frame_from_tables(_alpha_tables())
+    assert verdict_of(df, **SHIPPED)["decision"] == "promote_B"
+    v = verdict_of(df, **{**SHIPPED, "alpha": 0.025})
+    assert (v["decision"], v["conclusion"]) == ("keep_A", "inconclusive")
+    assert sorted(c for c, ok in passed(v).items() if not ok) == ["no_class_regression"]
+    assert v["per_class"][0]["status"] == "inconclusive" and v["plan"]["n_planned"] == 1960
+    for r in v["per_class"]:
+        a, b, n = r["only_a_correct"], r["only_b_correct"], r["n"]
+        assert r["lower"] == paired.score_lower_bound(a, b, n, 0.025)
+        assert r["upper"] == paired.score_upper_bound(a, b, n, 0.025)
+        assert r["n_floor"] == paired.noninferiority_floor(r["margin"], 0.025)
+    for r in v["per_predicted_class"]:
+        assert r["fa_lower"] == paired.score_lower_bound(r["only_a_alarm"], r["only_b_alarm"],
+                                                         r["n_other"], 0.025)
+    assert v["estimates"]["delta_lower"] == paired.score_lower_bound(
+        v["counts"]["only_a_correct"], v["counts"]["only_b_correct"], v["n_images"], 0.025)
+
+
+def test_a_class_of_exactly_its_floor_is_inconclusive():
+    tables = {k: (240, 3, 36, 21) for k in range(1, 10)}
+    tables[0] = (84, 3, 0, 0)      # 87 images: the zero-discordance floor at margin 0.05
+    tables[10] = (1450, 10, 100, 40)
+    row = verdict_of(frame_from_tables(tables), **SHIPPED)["per_class"][0]
+    assert (row["n"], row["n_floor"], row["status"]) == (87, 87, "inconclusive")
+    assert row["lower"] <= -0.05 <= row["upper"]
+
+
+def test_a_realistic_null_keeps_a(ab_df_paired_null):
+    v = decide_promotion(compute_all_metrics(ab_df_paired_null), **SHIPPED)
+    assert (v["decision"], v["conclusion"]) == ("keep_A", "inconclusive")
+    assert not passed(v)["superiority"]
+    assert 0.2 < v["estimates"]["discordance_rate"] < 0.3
+    assert not any(r["status"] == "regressed" for r in v["per_class"])
 
 
 def test_a_regressed_rare_class_is_named():
@@ -247,9 +360,22 @@ def test_row_order_index_and_json_do_not_change_the_verdict():
 
 def test_verdict_is_strict_json():
     for make, thresholds in [(promote_frame, SHIPPED), (_fixture_frame, SHIPPED),
-                             (lambda: frame_from_tables(F2_BASE), SLICE)]:
+                             (lambda: frame_from_tables(F2_BASE), SLICE),
+                             (lambda: frame_from_tables(F2_BASE), SHIPPED),
+                             (_one_class_frame, ONE)]:
         v = verdict_of(make(), **thresholds)
         assert json.loads(json.dumps(v, allow_nan=False)) == v
+
+
+def test_an_absent_class_at_the_deployment_prior():
+    v = verdict_of(frame_from_tables(F2_BASE), **SHIPPED)
+    details = {r["criterion"]: r["detail"] for r in v["reasons"]}
+    assert details["sample_size"] == ("classes [5] with a positive weight are absent: "
+                                      "n_effective = 0 < n_planned = 1544: fail")
+    assert details["superiority"].endswith(
+        "classes [5] absent: the prior-weighted difference is not estimable: fail")
+    assert (v["estimates"]["estimand_delta"], v["estimates"]["estimand_lower"]) == (None, None)
+    assert v["plan"]["n_effective"] == 0.0
 
 
 def _assert_invalid(v: dict, criteria=ALL_CRITERIA) -> None:
@@ -381,7 +507,9 @@ def test_class_clause_can_be_disabled():
 def test_a_threshold_changes_the_verdict():
     v = verdict_of(promote_frame(), **{**SHIPPED, "min_gain": 0.10, "min_detectable_gain": 0.12,
                                        "planning_discordance": 0.20})
-    assert v["decision"] == "keep_A"
+    assert (v["decision"], v["conclusion"]) == ("keep_A", "evidence_against_B")
+    assert v["plan"]["n_planned"] == 2823                       # planned against min_gain
+    assert v["estimates"]["estimand_upper"] == pytest.approx(0.08504440515842351, rel=1e-9)
     detail = {r["criterion"]: r["detail"] for r in v["reasons"]}["superiority"]
     assert "deployment_prior lower bound +0.0664 <= 0.1" in detail
 
@@ -402,20 +530,37 @@ def test_detail_strings_state_the_comparison_and_its_outcome():
     v = verdict_of(_fixture_frame(), **SHIPPED)
     detail = {r["criterion"]: r["detail"] for r in v["reasons"]}
     assert "lower bound -0.0953 <= 0.0" in detail["superiority"]
-    # Nine classes fail: five are listed, then the list is marked as cut.
+    # Nine classes fail: five are listed, each with the comparison that decides, then the
+    # list is marked as cut.
     assert detail["no_class_regression"] == (
-        "9 of 11 classes fail: 0: n = 40 < 87; 1: n = 58 < 87; 3: n = 48 < 147; "
-        "4: n = 49 < 87; 5: n = 48 < 147; ...: fail")
+        "9 of 11 classes fail: "
+        "0: lower bound -0.203 <= -0.050 (insufficient_n: n = 40 < zero-discordance floor 87); "
+        "1: lower bound -0.170 <= -0.050 (insufficient_n: n = 58 < zero-discordance floor 87); "
+        "3: lower bound -0.061 <= -0.030 (insufficient_n: n = 48 < zero-discordance floor 147); "
+        "4: lower bound -0.067 <= -0.050 (insufficient_n: n = 49 < zero-discordance floor 87); "
+        "5: lower bound -0.070 <= -0.030 (insufficient_n: n = 48 < zero-discordance floor 147); "
+        "...: fail")
 
 
-@pytest.mark.parametrize("override", [
-    {"alpha": 0.6}, {"noninferiority_margin": 0.0}, {"power": 0.3},
-    {"min_gain": 0.02, "min_detectable_gain": 0.02}, {"planning_discordance": 0.01},
-    {"class_prior": {0: 1.0}}, {"class_margins": {11: 0.03}}, {"expected_classes": [0, 0, 1]},
-    {"require_no_class_regression": "yes"}, {"false_alarm_margin": 1.5},
+@pytest.mark.parametrize("override, key", [
+    ({"alpha": 0.6}, "alpha"), ({"alpha": 0.02}, "alpha"), ({"alpha": 0.01}, "alpha"),
+    ({"noninferiority_margin": 0.0}, "noninferiority_margin"),
+    ({"power": 0.3}, "power"), ({"power": 1.0}, "power"),
+    ({"min_gain": 0.02, "min_detectable_gain": 0.02}, "min_detectable_gain"),
+    ({"planning_discordance": 0.01}, "planning_discordance"),
+    ({"planning_discordance": 1.5}, "planning_discordance"),
+    ({"class_prior": {0: 1.0}}, "class_prior"),
+    ({"class_prior": {k: 0.0 for k in range(11)}}, "class_prior"),
+    ({"class_prior": {np.int64(k): w for k, w in PRIOR.items()}}, "class_prior"),
+    ({"class_prior": {k: 1e308 for k in range(11)}}, "class_prior"),
+    ({"class_margins": {11: 0.03}}, "class_margins"),
+    ({"expected_classes": [0, 0, 1]}, "expected_classes"),
+    ({"expected_classes": [0, "1"]}, "expected_classes"),
+    ({"require_no_class_regression": "yes"}, "require_no_class_regression"),
+    ({"false_alarm_margin": 1.5}, "false_alarm_margin"),
 ])
-def test_out_of_range_thresholds_raise(override):
-    with pytest.raises(ValueError):
+def test_out_of_range_thresholds_raise(override, key):
+    with pytest.raises(ValueError, match=rf"\.{key} "):
         verdict_of(promote_frame(), **{**SHIPPED, **override})
 
 

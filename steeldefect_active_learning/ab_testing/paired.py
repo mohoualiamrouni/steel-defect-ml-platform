@@ -55,8 +55,10 @@ SCHEMA = "paired_counts/1"
 CELLS = ("both_correct", "only_a_correct", "only_b_correct", "both_wrong")   # n11, n10, n01, n00
 FA_CELLS = ("both_alarm", "only_a_alarm", "only_b_alarm", "neither_alarm")  # f11, f10, f01, f00
 ID_CANDIDATES = ("segmentation_id", "image_id", "image_path")
-# One count subtracted from the score numerator of every decision bound: it keeps the
-# exact size of each clause at or below alpha (Tango's plain interval reaches 0.07).
+# One count subtracted from the score numerator of every decision bound. In every
+# configuration checked by exact enumeration, for alpha from 0.025 to 0.45, it keeps the
+# size of each clause at or below alpha, except when every image of a class is discordant
+# (up to 1.009 alpha). Tango's plain interval reaches 0.07 at alpha = 0.05.
 CONTINUITY_ADJUSTMENT = 1
 
 
@@ -531,6 +533,13 @@ def _check_table(n10: int, n01: int, n: int) -> None:
         raise ValueError(f"inconsistent cells: n10={n10}, n01={n01}, n={n}")
 
 
+def _check_alpha(alpha: float) -> float:
+    """A one-sided level: z_(1-alpha) >= 0, which the bracket of the bound search assumes."""
+    if not 0.0 < alpha <= 0.5:
+        raise ValueError(f"alpha must be in (0, 0.5], got {alpha}")
+    return float(stats.norm.isf(alpha))
+
+
 def _p10_restricted(n10: float, n01: float, n: float, d0: float) -> float:
     """Restricted MLE of p10 under p01 = p10 + d0: the larger root of A q^2 + B q + C."""
     a = 2.0 * n
@@ -563,18 +572,16 @@ def score_statistic(n10: int, n01: int, n: int, d0: float, *,
 
 def score_lower_bound(n10: int, n01: int, n: int, alpha: float, *,
                       cc: int = CONTINUITY_ADJUSTMENT) -> float:
-    """One-sided (1 - alpha) lower bound of Delta = acc_B - acc_A.
+    """One-sided (1 - alpha) lower bound of Delta = acc_B - acc_A, for 0 < alpha <= 0.5.
 
     The smallest d0 the score test does not reject, found by bisection (the closed-form
     quartic has a double-root trap, and brentq can return the end point of the bracket).
     ``L > d0`` exactly when ``score_statistic(..., d0) > z_(1-alpha)``.
     """
     _check_table(n10, n01, n)
-    if not 0.0 < alpha < 1.0:
-        raise ValueError(f"alpha must be in (0, 1), got {alpha}")
+    z = _check_alpha(alpha)
     if n10 == n:
         return -1.0
-    z = float(stats.norm.isf(alpha))
     lo, hi = -1.0, (n01 - n10 - cc) / n
     if hi <= -1.0:
         return -1.0
@@ -605,13 +612,16 @@ def score_upper_bound(n10: int, n01: int, n: int, alpha: float, *,
 def noninferiority_floor(margin: float, alpha: float, *, cc: int = CONTINUITY_ADJUSTMENT) -> int:
     """Smallest class size at which a class with no discordant image passes ``-margin``.
 
+    A smaller class can still pass when B wins enough of its discordant images; a larger
+    one can fail. For 0 < alpha <= 0.5.
+
     At n10 = n01 = 0 and d0 = -m, Z = (n m - cc) / sqrt(n m (1 - m)); with
     k = z^2 (1 - m), the class passes once n m exceeds the larger root of
     r^2 - (2 cc + k) r + cc^2 (r = k without adjustment, Tango's eq. 30).
     """
     if not 0.0 < margin < 1.0:
         raise ValueError(f"margin must be in (0, 1), got {margin}")
-    z = float(stats.norm.isf(alpha))
+    z = _check_alpha(alpha)
     k = z * z * (1.0 - margin)
     b = 2.0 * cc + k
     r = (b + math.sqrt(b * b - 4.0 * cc * cc)) / 2.0
@@ -651,8 +661,9 @@ def mover_bounds(
 def n_effective(weights: Sequence[float], ns: Sequence[int]) -> float:
     """Effective number of images behind a weighted difference: 1 / sum_k w_k^2 / n_k.
 
-    It equals n when the weights are the slice's own class shares, and 0 when a class
-    with a positive weight has no image. The weights are renormalised to sum to 1.
+    It equals n when the weights are the slice's own class shares, up to floating-point
+    rounding (it can return n - 1e-13), and 0 when a class with a positive weight has no
+    image. The weights are renormalised to sum to 1.
     """
     w = np.asarray(weights, dtype=float)
     w = w / w.sum()
@@ -674,7 +685,12 @@ def planning_n(psi: float, delta1: float, d0: float, alpha: float, power: float)
     Returns:
         The number of images, or None when the alternative is impossible
         (psi < |delta1|, psi outside (0, 1], or delta1 <= d0).
+
+    Raises ValueError unless 0 < alpha <= 0.5 and 0 < power < 1.
     """
+    z_alpha = _check_alpha(alpha)
+    if not 0.0 < power < 1.0:
+        raise ValueError(f"power must be in (0, 1), got {power}")
     if not (0.0 < psi <= 1.0 and psi >= abs(delta1) and delta1 > d0):
         return None
     p10 = (psi - delta1) / 2.0
@@ -682,7 +698,7 @@ def planning_n(psi: float, delta1: float, d0: float, alpha: float, power: float)
     q = _p10_restricted(p10, p01, 1.0, d0)
     s0 = math.sqrt(max(2.0 * q + d0 * (1.0 - d0), 0.0))
     s1 = math.sqrt(max(psi - delta1 * delta1, 0.0))
-    z_alpha, z_power = float(stats.norm.isf(alpha)), float(stats.norm.ppf(power))
+    z_power = float(stats.norm.ppf(power))
     return int(math.ceil((z_alpha * s0 + z_power * s1) ** 2 / (delta1 - d0) ** 2))
 
 
