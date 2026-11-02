@@ -507,7 +507,7 @@ def hedges_correction(d: float, n_a: int, n_b: int) -> float:
 
 
 # ---------------------------------------------------------------------------
-# McNemar's test for paired classifiers (cascade step 3)
+# McNemar's test for paired classifiers
 # ---------------------------------------------------------------------------
 
 def mcnemar_test(df: pd.DataFrame, exact_threshold: int = 25) -> Dict:
@@ -575,13 +575,13 @@ def per_class_mcnemar(
 
     Returns a DataFrame with one row per class:
         class_id, n, b, c, statistic, p_value, p_corrected, reject, test_used, alternative.
-    Empty, with the reason in ``attrs['reason']``, when the labels or the correctness are
-    missing or invalid.
+    Empty, with the reason in ``attrs['reason']``, when the frame has no rows or the
+    labels or the correctness are missing or invalid.
     """
     rows, errors = class_cells(df, class_col=class_col)
-    if errors:
+    if errors or not rows:
         out = pd.DataFrame(columns=_PER_CLASS_MCNEMAR_COLUMNS)
-        out.attrs["reason"] = "; ".join(errors)
+        out.attrs["reason"] = "; ".join(errors) if errors else "no rows"
         return out
     return _per_class_mcnemar_table(rows, correction, alpha)
 
@@ -836,7 +836,11 @@ def compute_all_metrics(
         "diagnostic_errors": [],
     }
     errors = out["diagnostic_errors"]
-    _derive_summary_columns(df, errors)
+    try:
+        _derive_summary_columns(df, errors)
+    except Exception as exc:  # noqa: BLE001 — the gate's block is already built
+        logger.warning("A/B summary columns not derived: %s", exc)
+        errors.append({"block": "input", "error": f"{type(exc).__name__}: {exc}"})
 
     def run(name: str, compute) -> None:
         try:
@@ -884,7 +888,8 @@ def compute_all_metrics(
     if bootstrap_n > 0 and "confidence_a" in df.columns and "confidence_b" in df.columns:
         run("bootstrap", bootstrap)
 
-    # Bayesian decision (Beta-Binomial on agreement/accuracy + Normal on confidence).
+    # Bayesian blocks: Beta-Binomial on agreement, paired Dirichlet on accuracy, Normal on
+    # confidence.
     def bayesian_block() -> Dict:
         from .bayesian import bayesian_summary
         return bayesian_summary(df, decision_threshold=bayesian_decision_threshold,
@@ -924,16 +929,17 @@ def compute_all_metrics(
     # McNemar, overall and per class, from the validated counts: one source of truth
     # with the gate, and nothing when the slice breaks the contract.
     pc = out["paired_counts"]
+
+    def per_class_mcnemar_block() -> Dict:
+        table = _per_class_mcnemar_table(pc["per_class"], correction, alpha)
+        return {"method": table.attrs["correction_method"], "alpha": alpha,
+                "rows": table.to_dict(orient="records")}
+
     if pc["valid"]:
         n10, n01 = pc["only_a_correct"], pc["only_b_correct"]
-        out["mcnemar"] = {"applicable": True, **mcnemar_two_sided(n10, n01),
-                          "n_concordant": pc["n"] - n10 - n01}
-        table = _per_class_mcnemar_table(pc["per_class"], correction, alpha)
-        out["per_class_mcnemar"] = {
-            "method": table.attrs["correction_method"],
-            "alpha":  alpha,
-            "rows":   table.to_dict(orient="records"),
-        }
+        run("mcnemar", lambda: {"applicable": True, **mcnemar_two_sided(n10, n01),
+                                "n_concordant": pc["n"] - n10 - n01})
+        run("per_class_mcnemar", per_class_mcnemar_block)
 
     if "entropy_a" in df.columns:
         run("entropy", lambda: entropy_comparison(df))
@@ -969,7 +975,8 @@ def _derive_summary_columns(df: pd.DataFrame, errors: List[Dict]) -> None:
     """
     cols = set(df.columns)
     if {"pred_a", "pred_b"} <= cols:
-        derived = (df["pred_a"] == df["pred_b"]).astype(int)
+        # As objects: pandas refuses to compare categoricals whose categories differ.
+        derived = (df["pred_a"].astype(object) == df["pred_b"].astype(object)).astype(int)
         if "agrees" in cols:
             k = int((pd.to_numeric(df["agrees"], errors="coerce") != derived).sum())
             if k:
@@ -1010,9 +1017,10 @@ def plot_comparison(
     task: str = "classification",
     prefix: str = "ab",
 ) -> None:
-    """Generate and save the standard 4 A/B diagnostic PNGs.
+    """Generate and save the 3 standard A/B diagnostic PNGs.
 
-    Saved files:
+    The third is per_class_agreement for classification, iou_distribution for
+    segmentation. Saved files:
         {prefix}_disagreement_rate.png
         {prefix}_confidence_delta_dist.png
         {prefix}_per_class_agreement.png   (classification only)

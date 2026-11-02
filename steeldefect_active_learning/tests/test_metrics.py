@@ -191,6 +191,22 @@ class TestMcNemar:
         out = per_class_mcnemar(df)
         assert out.empty and "class column 'label' is missing" in out.attrs["reason"]
 
+    def test_per_class_mcnemar_on_a_frame_without_rows(self, ab_df_classification):
+        out = per_class_mcnemar(ab_df_classification.iloc[:0])
+        assert out.empty and out.attrs["reason"] == "no rows"
+        assert list(out.columns) == ["class_id", "n", "b", "c", "statistic", "p_value",
+                                     "p_corrected", "reject", "test_used", "alternative"]
+
+    @pytest.mark.parametrize("b, c, test_used, p_value", [
+        (10, 14, "mcnemar_exact", 0.5412561893463135),    # 24 discordant pairs: exact
+        (10, 15, "mcnemar_yates", 0.4237107971667936),    # 25: Yates from the threshold
+    ])
+    def test_exact_below_25_discordant_pairs(self, b, c, test_used, p_value):
+        df = pd.DataFrame({"correct_a": [1] * b + [0] * c, "correct_b": [0] * b + [1] * c})
+        out = mcnemar_test(df)
+        assert out["test_used"] == test_used
+        assert out["p_value"] == pytest.approx(p_value, rel=1e-12, abs=0)
+
 
 # ---------------------------------------------------------------------------
 # CUPED
@@ -324,6 +340,7 @@ class TestComputeAllMetrics:
         out = compute_all_metrics(ab_df_classification)
         pc = out["paired_counts"]
         assert (out["mcnemar"]["b"], out["mcnemar"]["c"]) == (pc["only_a_correct"], pc["only_b_correct"])
+        assert out["mcnemar"]["n_concordant"] == pc["both_correct"] + pc["both_wrong"]
         assert out["mcnemar"]["alternative"] == "two-sided"
         rows = out["per_class_mcnemar"]["rows"]
         assert [(r["class_id"], r["b"], r["c"]) for r in rows] == [
@@ -355,6 +372,46 @@ class TestComputeAllMetrics:
             "block": "input",
             "error": "agrees disagrees with pred_a == pred_b on 7 row(s); derived values used"}]
         assert out["disagreement"]["rate"] == pytest.approx(float((df["pred_a"] != df["pred_b"]).mean()))
+
+    def test_stale_confidence_delta_is_replaced(self, ab_df_classification):
+        df = ab_df_classification.copy()
+        df.loc[df.index[:5], "confidence_delta"] += 0.01
+        out = compute_all_metrics(df)
+        assert out["diagnostic_errors"] == [{
+            "block": "input",
+            "error": "confidence_delta disagrees with |confidence_a - confidence_b| on 5 row(s); "
+                     "derived values used"}]
+
+    def test_a_missing_arm_makes_srm_not_applicable(self, ab_df_classification):
+        arms = np.where(np.arange(len(ab_df_classification)) < 250, "a", "b").astype(object)
+        arms[3] = None
+        srm = compute_all_metrics(ab_df_classification.assign(arm=arms))["srm"]
+        assert srm["applicable"] is False and "1 missing" in srm["reason"]
+
+    @pytest.mark.filterwarnings("ignore:The default of observed=False:FutureWarning")
+    def test_categorical_predictions_with_different_categories(self, ab_df_classification):
+        # B predicts a class A never does: pandas refuses to compare the two categoricals.
+        df = ab_df_classification.assign(**{c: "c" + ab_df_classification[c].astype(str)
+                                            for c in ("label", "pred_a", "pred_b")})
+        df["pred_a"] = df["pred_a"].replace("c4", "c5")
+        cat = df.astype({c: "category" for c in ("label", "pred_a", "pred_b")})
+        assert set(cat["pred_a"].cat.categories) != set(cat["pred_b"].cat.categories)
+        out = compute_all_metrics(cat)
+        assert out["paired_counts"] == compute_all_metrics(df)["paired_counts"]
+        assert out["paired_counts"]["valid"] is True
+        assert out["disagreement"]["rate"] == pytest.approx(float((df["pred_a"] != df["pred_b"]).mean()))
+
+    def test_unknown_correction_fails_only_its_block(self, ab_df_classification):
+        out = compute_all_metrics(ab_df_classification, correction="sidak")
+        assert [e["block"] for e in out["diagnostic_errors"]] == ["per_class_mcnemar"]
+        assert "per_class_mcnemar" not in out and "mcnemar" in out
+        assert out["paired_counts"]["valid"] is True
+
+    def test_repeated_columns_give_an_invalid_block(self, ab_df_classification):
+        df = pd.concat([ab_df_classification, ab_df_classification[["label"]]], axis=1)
+        out = compute_all_metrics(df)
+        assert out["paired_counts"]["errors"] == ["repeated column names: ['label']"]
+        assert "mcnemar" not in out
 
     @pytest.mark.filterwarnings("ignore::RuntimeWarning")
     def test_failed_diagnostic_is_recorded_not_raised(self, ab_df_classification):
