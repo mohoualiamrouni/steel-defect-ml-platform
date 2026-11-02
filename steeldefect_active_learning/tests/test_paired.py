@@ -391,10 +391,39 @@ def _contract_violations(demo: pd.DataFrame):
                   "pred_a and label use different encodings"))
     names = demo.copy()
     names.loc[names.index[0], "label_name"] = "pit"
-    cases.append(("names not one-to-one", names, "label_name is not one-to-one with label"))
+    cases.append(("two names for one class", names, "label_name is not one-to-one with label"))
+    shared = demo.copy()
+    shared.loc[shared["label"] == 1, "label_name"] = "scratch"
+    cases.append(("one name for two classes", shared, "label_name is not one-to-one with label"))
     cases.append(("empty frame", demo.iloc[:0], "no rows"))
     cases.append(("no identifier", demo.drop(columns=["image_path"]),
                   "no identifier column (looked for ['segmentation_id', 'image_id', 'image_path'])"))
+    one_id = demo.astype({"image_path": object})
+    one_id.loc[one_id.index[7], "image_path"] = None
+    cases.append(("one missing identifier", one_id, "image_path: 1 missing identifier(s)"))
+    cases.append(("one row appended twice", pd.concat([demo, demo.iloc[[3]]]),
+                  "image_path: 1 duplicated row(s) (1100 unique of 1101)"))
+    half = demo.drop(columns=["label_name"]).astype({"label": float})
+    half.loc[half.index[0], "label"] = 2.5
+    cases.append(("non-integral label", half, "label: non-integral float values"))
+    two = corr.copy()
+    two.loc[two.index[0], "correct_b"] = 2
+    cases.append(("correct_b holds a 2", two, "correct_b: integer values other than 0/1: [2]"))
+    one = demo.assign(correct_a=(demo["pred_a"] == demo["label"]).astype(int),
+                      correct_b=(demo["pred_b"] == demo["label"]).astype(int))
+    one.loc[one.index[0], "correct_b"] = 1 - one.loc[one.index[0], "correct_b"]
+    cases.append(("correctness disagrees on one row", one,
+                  "correct_a/correct_b disagree with pred_*==label on 1 row(s)"))
+    cases.append(("repeated label column", pd.concat([demo, demo[["label"]]], axis=1),
+                  "repeated column names: ['label']"))
+    cases.append(("repeated identifier column", pd.concat([demo, demo[["image_path"]]], axis=1),
+                  "repeated column names: ['image_path']"))
+    listed = demo.astype({"image_path": object})
+    listed.at[listed.index[2], "image_path"] = ["img", 2]
+    cases.append(("an unhashable identifier", listed, "image_path: 1 unhashable value(s)"))
+    listed_names = demo.astype({"label_name": object})
+    listed_names.at[listed_names.index[2], "label_name"] = ["scratch"]
+    cases.append(("an unhashable name", listed_names, "label_name: 1 unhashable value(s)"))
     return cases
 
 
@@ -406,6 +435,24 @@ def test_contract_violations_make_the_block_invalid(demo):
         assert pc["per_class"] == [] and pc["per_predicted_class"] is None, case
         assert any(e.startswith(prefix) for e in pc["errors"]), (case, pc["errors"])
         assert paired.paired_counts_errors(pc), case
+
+
+def test_label_and_prediction_errors_are_both_listed(demo):
+    df = demo.assign(label=demo["label"].astype(float), pred_a=demo["pred_a"].astype(float))
+    df.loc[df.index[:3], "label"] = np.nan
+    df.loc[df.index[10:15], "pred_a"] = np.nan
+    assert paired.paired_counts(df)["errors"] == ["label: 3 missing value(s)",
+                                                  "pred_a: 5 missing value(s)"]
+
+
+def test_unnamed_classes_keep_the_slice_valid(demo):
+    # label_name is display only: two classes without a name are not "one name for two".
+    df = demo.astype({"label_name": object})
+    df.loc[df["label"].isin([3, 5]), "label_name"] = None
+    pc = paired.paired_counts(df)
+    assert pc["valid"] is True
+    names = {r["class"]: r["name"] for r in pc["per_class"]}
+    assert names[3] is None and names[5] is None and names[0] == "scratch"
 
 
 def test_correctness_columns_alone_are_valid_without_alarm_counts(demo):
@@ -458,8 +505,12 @@ def test_paired_counts_errors_on_hand_built_blocks(demo):
     assert paired.paired_counts_errors(None) == ["paired_counts block missing"]
     assert paired.paired_counts_errors({**good, "schema": None})
     assert paired.paired_counts_errors({**good, "n": good["n"] + 1})
-    assert paired.paired_counts_errors({**good, "both_correct": True})
-    assert paired.paired_counts_errors({**good, "both_correct": 753.0})
+    assert paired.paired_counts_errors({**good, "both_correct": True}) == [
+        "paired_counts cells must be non-negative integers"]
+    assert paired.paired_counts_errors({**good, "both_correct": 753.0}) == [
+        "paired_counts cells must be non-negative integers"]
+    assert paired.paired_counts_errors({**good, "errors": ["late"]}) == [
+        "paired_counts marked valid but lists errors"]
     rows = [dict(r) for r in good["per_class"]]
     rows[0]["only_b_correct"] += 1
     rows[0]["both_correct"] -= 1
@@ -468,3 +519,106 @@ def test_paired_counts_errors_on_hand_built_blocks(demo):
     alarms[0]["n_other"] += 1
     alarms[0]["neither_alarm"] += 1
     assert paired.paired_counts_errors({**good, "per_predicted_class": alarms})
+
+
+def _alarm_rows(block, drop=()):
+    return [dict(r) for r in block["per_predicted_class"] if r["class"] not in drop]
+
+
+def test_every_labelled_class_needs_its_alarm_row(demo):
+    # A block without its false-alarm rows would let any B through the veto.
+    good = paired.paired_counts(demo)
+    missing = "paired_counts.per_predicted_class has no row for labelled classes "
+    errors = paired.paired_counts_errors({**good, "per_predicted_class": _alarm_rows(good, drop={5})})
+    assert missing + "[5]" in errors
+    errors = paired.paired_counts_errors({**good, "per_predicted_class": []})
+    assert missing + "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9] and 1 more" in errors
+    dropped = json.loads(json.dumps({**good, "per_predicted_class": _alarm_rows(good, drop={5})}))
+    assert missing + "[5]" in paired.paired_counts_errors(dropped)
+
+
+def test_alarms_add_up_to_the_wrong_predictions(demo):
+    # Each wrong prediction is one false alarm into the class it predicts.
+    good = paired.paired_counts(demo)
+    alarms = _alarm_rows(good)
+    alarms[5]["only_b_alarm"] -= 1
+    alarms[5]["neither_alarm"] += 1
+    assert paired.paired_counts_errors({**good, "per_predicted_class": alarms}) == [
+        "paired_counts.per_predicted_class: A and B have 202 and 178 false alarms, "
+        "but 202 and 179 wrong predictions"]
+    # A class predicted but never labelled: its row cannot be dropped either.
+    df = demo.copy()
+    df.loc[df.index[:3], "pred_b"] = 11
+    block = paired.paired_counts(df)
+    assert [r["class"] for r in block["per_predicted_class"]][-1] == 11
+    assert paired.paired_counts_errors({**block, "per_predicted_class": _alarm_rows(block, drop={11})})
+
+
+def test_predictions_flag_matches_the_alarm_rows(demo):
+    good = paired.paired_counts(demo)
+    flag = "paired_counts.per_predicted_class must be a list when predictions_available is true, null otherwise"
+    assert paired.paired_counts_errors({**good, "per_predicted_class": None}) == [flag]
+    assert paired.paired_counts_errors({**good, "predictions_available": False}) == [flag]
+    assert paired.paired_counts_errors({**good, "per_predicted_class": {}}) == [flag]
+    assert paired.paired_counts_errors({**good, "predictions_available": "yes"}) == [
+        "paired_counts.predictions_available must be true or false"]
+    corr = paired.paired_counts(_with_correctness(demo))
+    assert paired.paired_counts_errors(corr) == []
+    assert paired.paired_counts_errors({**corr, "per_predicted_class": _alarm_rows(good)}) == [flag]
+
+
+def test_repeated_or_bad_classes_and_empty_rows(demo):
+    good = paired.paired_counts(demo)
+    rows = [dict(r) for r in good["per_class"]]
+    rows[1]["class"] = 0
+    errors = paired.paired_counts_errors({**good, "per_class": rows})
+    assert "paired_counts.per_class[1]: bad or repeated class 0" in errors
+    for key in (None, True, 2.0, [0], "3"):
+        rows = [dict(r) for r in good["per_class"]]
+        rows[3]["class"] = key
+        errors = paired.paired_counts_errors({**good, "per_class": rows})
+        if key == "3":   # a str class is a valid key, but then class 3 has no alarm row
+            assert any("no row for labelled classes" in e for e in errors), errors
+        else:
+            assert f"paired_counts.per_class[3]: bad or repeated class {key!r}" in errors
+    alarms = _alarm_rows(good) + [dict(good["per_predicted_class"][5])]
+    assert paired.paired_counts_errors({**good, "per_predicted_class": alarms}) == [
+        "paired_counts.per_predicted_class[11]: bad or repeated class 5"]
+    # paired_counts never emits a class without images; an absent class has no row.
+    zero = {**good, **{c: 0 for c in paired.CELLS}, "n": 0, "predictions_available": False,
+            "per_predicted_class": None,
+            "per_class": [{"class": 0, "name": None, "n": 0, **{c: 0 for c in paired.CELLS}}]}
+    assert paired.paired_counts_errors(zero) == [
+        "paired_counts: cells sum to 0, n = 0",
+        "paired_counts.per_class[0] (class 0): cells must be counts summing to n > 0"]
+
+
+@pytest.mark.parametrize("change", [
+    {"per_class": [1, 2]},
+    {"per_class": [None]},
+    {"per_class": "rows"},
+    {"per_predicted_class": [None]},
+    {"per_predicted_class": ["row"]},
+    {"errors": [1, None], "valid": False},
+    {"id_col": float("nan")},
+    {"id_col": ["image_path"]},
+    {"n": None},
+    {"n": float("nan")},
+])
+def test_paired_counts_errors_never_raise(demo, change):
+    errors = paired.paired_counts_errors({**paired.paired_counts(demo), **change})
+    assert errors and all(isinstance(e, str) for e in errors)
+
+
+def test_names_must_be_strings_or_null(demo):
+    good = paired.paired_counts(demo)
+    rows = [dict(r) for r in good["per_class"]]
+    rows[3]["name"] = float("nan")
+    assert paired.paired_counts_errors({**good, "per_class": rows}) == [
+        "paired_counts.per_class[3] (class 3): name must be a string or null"]
+    alarms = _alarm_rows(good)
+    alarms[2]["name"] = 7
+    assert paired.paired_counts_errors({**good, "per_predicted_class": alarms}) == [
+        "paired_counts.per_predicted_class[2] (class 2): name must be a string or null"]
+    unnamed = [dict(r, name=None) for r in good["per_class"]]
+    assert paired.paired_counts_errors({**good, "per_class": unnamed}) == []

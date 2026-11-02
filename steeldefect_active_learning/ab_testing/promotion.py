@@ -186,7 +186,8 @@ def decide_promotion(
             if r["class"] not in universe and r["class"] not in outside:
                 outside.append(r["class"])
         if outside:
-            errors.append(f"classes outside expected_classes in the slice: {outside[:10]}")
+            more = f" and {len(outside) - 10} more" if len(outside) > 10 else ""
+            errors.append(f"classes outside expected_classes in the slice: {outside[:10]}{more}")
         if false_alarm_margin is not None and not pc.get("predictions_available"):
             errors.append("the false-alarm clause needs pred_a and pred_b (correct_* columns "
                           "alone cannot feed it)")
@@ -337,6 +338,8 @@ def decide_promotion(
         for k in order:
             mu = float(fa_margins.get(k, false_alarm_margin))
             r = alarm_rows.get(k)
+            # No row: the class is never labelled and never predicted (paired_counts_errors
+            # rejects any other gap). n_other = 0: every image is of class k.
             if r is None or r["n_other"] == 0:
                 verdict["per_predicted_class"].append({
                     "class": k, "name": None, "n_other": 0 if r is None else r["n_other"],

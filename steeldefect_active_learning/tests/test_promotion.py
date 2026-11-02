@@ -269,13 +269,52 @@ def test_missing_or_invalid_evidence_keeps_a():
         _assert_invalid(decide_promotion(cascade, **SHIPPED))
 
 
+def _unknown_class_frame() -> pd.DataFrame:
+    """promote_frame, with B predicting class 11, outside the taxonomy, on three images."""
+    df = promote_frame()
+    df.loc[df.index[:3], "pred_b"] = 11
+    return df
+
+
+def test_incomplete_or_malformed_blocks_keep_a():
+    # Hand-built or JSON blocks: each one promoted B, or raised, before the validator saw it.
+    thresholds = {**SLICE, "class_margins": {}}
+    g3 = paired.paired_counts(_g3_frame(concentrated=True))
+    assert decide_promotion({"paired_counts": g3}, **thresholds)["vetoed_classes"] == [5]
+    without_5 = [r for r in g3["per_predicted_class"] if r["class"] != 5]
+    unknown = paired.paired_counts(_unknown_class_frame())
+    absent = paired.paired_counts(frame_from_tables(F2_BASE))
+    zero_row = {"class": 5, "name": None, "n": 0, **{c: 0 for c in paired.CELLS}}
+    blocks = [
+        {**g3, "per_predicted_class": without_5},
+        json.loads(json.dumps({**g3, "per_predicted_class": without_5})),
+        {**g3, "per_predicted_class": []},
+        {**g3, "per_predicted_class": None},
+        {**g3, "per_predicted_class": [None, *g3["per_predicted_class"]]},
+        {**unknown, "per_predicted_class": [r for r in unknown["per_predicted_class"]
+                                            if r["class"] != 11]},
+        {**absent, "per_class": sorted(absent["per_class"] + [zero_row], key=lambda r: r["class"])},
+        {**g3, "per_class": [1, 2]},
+        {**g3, "per_class": [dict(r, **{"class": [r["class"]]}) for r in g3["per_class"]]},
+        {**g3, "per_class": [dict(r, name=float("nan")) for r in g3["per_class"]]},
+        {**g3, "id_col": float("nan")},
+        {**g3, "valid": False, "errors": [1, None]},
+    ]
+    for block in blocks:
+        _assert_invalid(decide_promotion({"paired_counts": block}, **thresholds))
+
+
 def test_contract_violations_keep_a():
     df = promote_frame()
+    # B identical to A, with correct_a coded 0/2: read as 0/1 it would be all wrong for A.
+    coded = _correctness_only(df.assign(pred_b=df["pred_a"]))
+    coded["correct_a"] = 2 * coded["correct_a"]
     frames = [
         df.assign(arm="a"),
         df.drop(columns=["image_path"]),
         df.assign(label=df["label"].astype(float).where(df["label"] != 5)),
         df.assign(pred_b=df["pred_b"].astype(float).where(df.index % 50 != 0)),
+        coded,
     ]
     for frame in frames:
         _assert_invalid(verdict_of(frame, **SHIPPED))
@@ -296,6 +335,15 @@ def test_classes_outside_the_taxonomy_keep_a():
                                        "class_prior": "slice"})
     _assert_invalid(v)
     assert "classes outside expected_classes in the slice: [10]" in v["reasons"][0]["detail"]
+    # A prediction outside the taxonomy, with every label inside it.
+    v = verdict_of(_unknown_class_frame(), **SHIPPED)
+    _assert_invalid(v)
+    assert "classes outside expected_classes in the slice: [11]" in v["reasons"][0]["detail"]
+    # A long list is cut, and says so.
+    v = verdict_of(promote_frame(), **{**SHIPPED, "expected_classes": [100], "class_prior": "slice",
+                                       "class_margins": {}, "class_false_alarm_margins": {}})
+    assert ("classes outside expected_classes in the slice: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] "
+            "and 1 more") in v["reasons"][0]["detail"]
 
 
 def test_gate_ignores_the_agreement_block():
