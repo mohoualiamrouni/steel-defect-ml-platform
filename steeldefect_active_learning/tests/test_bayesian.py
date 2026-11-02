@@ -80,6 +80,10 @@ class TestBayesianSummary:
         assert acc["n_discordant"] == 618
         lo, hi = acc["cred_interval_diff"]
         assert lo < 32 / 650 < hi        # observed acc_B - acc_A = (325 - 293) / 650
+        # Dirichlet(33, 294, 326, 1): E[acc_A] = (33 + 294) / 654, E[acc_B] = (33 + 326) / 654.
+        assert (acc["posterior_mean_a"], acc["posterior_mean_b"]) == (327 / 654, 359 / 654)
+        assert acc["decision"] == "keep_a"                       # 0.9008 < 0.95
+        assert acc["expected_loss_keep_a"] > acc["expected_loss_ship_b"]
 
     def test_accuracy_posterior_uses_the_pairing(self):
         # B fixes 20 of A's errors and breaks none (McNemar p = 2^-20): independent

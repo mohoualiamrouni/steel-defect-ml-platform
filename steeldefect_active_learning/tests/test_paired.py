@@ -92,18 +92,22 @@ def test_mcnemar_two_sided_does_not_underflow():
     (3, 10, 0.9713134765625),
     (5, 14, 0.9793052673339844),
     (0, 0, 0.5),
+    (20, 0, 4.76837158203125e-07),     # 2^-21
+    (60, 0, 4.336808689942018e-19),    # 2^-61: 1 - cdf would give 0
 ])
 def test_posterior_reference(n10, n01, expected):
-    assert paired.posterior_b_better(n10, n01) == pytest.approx(expected, abs=1e-12)
+    assert paired.posterior_b_better(n10, n01) == pytest.approx(expected, rel=1e-12, abs=0)
 
 
 def test_posterior_is_one_minus_mid_p():
+    # 1 - mid-p written without the cancellation of 1 - (...), so that the tail is checked.
     for n10 in range(0, 61, 3):
         for n01 in range(0, 61, 3):
             m = n10 + n01
-            mid_p = 0.5 if m == 0 else (stats.binom.sf(n01, m, 0.5)
-                                        + 0.5 * stats.binom.pmf(n01, m, 0.5))
-            assert paired.posterior_b_better(n10, n01) == pytest.approx(1 - mid_p, abs=1e-12)
+            one_minus_mid_p = 0.5 if m == 0 else (stats.binom.cdf(n01 - 1, m, 0.5)
+                                                  + 0.5 * stats.binom.pmf(n01, m, 0.5))
+            assert paired.posterior_b_better(n10, n01) == pytest.approx(one_minus_mid_p,
+                                                                        rel=1e-10, abs=0)
 
 
 # ---------------------------------------------------------------------------
@@ -315,16 +319,20 @@ def test_superiority_size_exceeds_alpha_below_the_range():
     ((0.05, 0.0, -0.02, 0.05, 0.80), 837),
     ((0.10, 0.02, -0.05, 0.05, 0.8 ** (1 / 11)), 306),
     ((0.10, 0.02, -0.03, 0.05, 0.8 ** (1 / 11)), 573),
+    ((0.02, 0.02, 0.0, 0.05, 0.80), 308),     # psi = delta1: B never loses, still feasible
+    ((0.10, 0.02, 0.0, 0.025, 0.80), 1960),
+    ((0.10, 0.02, 0.0, 0.01, 0.80), 2507),
 ])
 def test_planning_n(args, n):
     assert paired.planning_n(*args) == n
 
 
-def test_planning_n_at_zero_is_connor():
+@pytest.mark.parametrize("alpha", [0.025, 0.05, 0.10])
+def test_planning_n_at_zero_is_connor(alpha):
     psi, delta = 0.10, 0.02
-    connor = (stats.norm.isf(0.05) * math.sqrt(psi)
+    connor = (stats.norm.isf(alpha) * math.sqrt(psi)
               + stats.norm.ppf(0.80) * math.sqrt(psi - delta ** 2)) ** 2 / delta ** 2
-    assert paired.planning_n(psi, delta, 0.0, 0.05, 0.80) == math.ceil(connor)
+    assert paired.planning_n(psi, delta, 0.0, alpha, 0.80) == math.ceil(connor)
 
 
 @pytest.mark.parametrize("args", [

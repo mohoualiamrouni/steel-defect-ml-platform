@@ -146,6 +146,46 @@ def test_job_promotes_only_with_a_model_version(job, registry_calls, config_path
     assert spark.saved[0][1][0]["promoted_model_uri"] == "models:/steeldefect_segmenter/7"
 
 
+def _config_with(config_path: str, tmp_path: Path, name: str, ab_testing=None, promotion=None) -> str:
+    raw = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
+    raw["ab_testing"].update(ab_testing or {})
+    raw["ab_testing"]["promotion"].update(promotion or {})
+    path = tmp_path / name
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    return str(path)
+
+
+def test_job_reads_the_gate_thresholds_from_its_config(job, registry_calls, config_path, tmp_path):
+    # The shipped thresholds promote this B; a min_gain it cannot clear must keep A.
+    strict = _config_with(config_path, tmp_path, "strict.yaml", promotion={
+        "min_gain": 0.10, "min_detectable_gain": 0.12, "planning_discordance": 0.20})
+    spark = FakeSpark(_promote_frame())
+    assert job.main(spark, "eval-1", "a", "models:/steeldefect_segmenter/7", model_b_version=7,
+                    config_path=strict) is None
+    assert spark.saved[0][1][0]["decision"] == "keep_A" and registry_calls == []
+
+
+def _class_0_differs() -> pd.DataFrame:
+    """Only class 0 has discordant images (A 5, B 21): its BH-adjusted McNemar p is 0.036."""
+    rows = []
+    for k in range(11):
+        n11, n10, n01, n00 = (200, 5, 21, 20) if k == 0 else (200, 0, 0, 20)
+        rows += [(k, k, k)] * n11 + [(k, k, (k + 2) % 11)] * n10
+        rows += [(k, (k + 1) % 11, k)] * n01 + [(k, (k + 1) % 11, (k + 1) % 11)] * n00
+    df = pd.DataFrame(rows, columns=["label", "pred_a", "pred_b"])
+    df.insert(0, "image_path", [f"img_{j:06d}.png" for j in range(len(df))])
+    return df
+
+
+@pytest.mark.parametrize("alpha, reject", [(0.05, True), (0.025, False)])
+def test_job_passes_its_alpha_to_the_diagnostics(job, registry_calls, config_path, tmp_path,
+                                                 alpha, reject):
+    path = _config_with(config_path, tmp_path, f"alpha_{alpha}.yaml", ab_testing={"alpha": alpha})
+    spark = FakeSpark(_class_0_differs())
+    job.main(spark, "eval-1", "a", "b", config_path=path)
+    assert spark.saved[0][1][0]["bh_reject"] is reject
+
+
 def test_job_keeps_a_on_an_invalid_slice(job, registry_calls, config_path):
     spark = FakeSpark(pd.concat([_promote_frame()] * 2))     # every image twice
     assert job.main(spark, "eval-1", "a", "b", model_b_version=7, config_path=config_path) is None
