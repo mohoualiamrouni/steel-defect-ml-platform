@@ -278,6 +278,23 @@ def test_demo_warnings_at_its_own_class_mix():
         "classes below their planned size: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]",
         "estimand: the slice's own class mix (class_prior='slice')"]
     assert {r["n_planned"] for r in v["per_class"]} == {306}
+    assert [r["weight"] for r in v["per_class"]] == pytest.approx([1 / 11] * 11, rel=1e-12)
+
+
+def test_alpha_reaches_the_mcnemar_test():
+    # B wins 127 discordant images and loses 99: one-sided exact p = 0.0361. Promoted at
+    # alpha 0.05; at 0.025 only the McNemar half of superiority fails.
+    tables = {k: (360, 11, 5, 24) for k in (0, 1, 2, 4, 6, 7, 9)}
+    tables.update({k: (368, 4, 4, 24) for k in (3, 5, 8)})
+    tables[10] = (1880, 10, 80, 30)
+    df = frame_from_tables(tables)
+    assert verdict_of(df, **SHIPPED)["decision"] == "promote_B"
+    v = verdict_of(df, **{**SHIPPED, "alpha": 0.025})
+    assert (v["decision"], v["conclusion"]) == ("keep_A", "inconclusive")
+    assert sorted(c for c, ok in passed(v).items() if not ok) == ["superiority"]
+    # P(X >= 127), X ~ Bin(226, 1/2), in exact rationals
+    assert v["estimates"]["mcnemar_p_one_sided"] == pytest.approx(0.036128791450491506, rel=1e-12)
+    assert v["estimates"]["estimand_lower"] > 0
 
 
 def test_alpha_reaches_every_bound():
@@ -535,7 +552,7 @@ def test_a_threshold_changes_the_verdict():
 def test_detail_strings_state_the_comparison_and_its_outcome():
     cases = [(promote_frame(), SHIPPED), (_fixture_frame(), SHIPPED),
              (_g3_frame(concentrated=True), {**SLICE, "class_margins": {}}),
-             (promote_frame().assign(arm="a"), SHIPPED)]
+             (frame_from_tables(F2_BASE), SLICE), (promote_frame().assign(arm="a"), SHIPPED)]
     for df, thresholds in cases:
         for r in verdict_of(df, **thresholds)["reasons"]:
             if r["detail"] != "not evaluated: invalid input":
@@ -579,6 +596,18 @@ def test_detail_strings_state_the_comparison_and_its_outcome():
 ])
 def test_out_of_range_thresholds_raise(override, key):
     with pytest.raises(ValueError, match=rf"\.{key} "):
+        verdict_of(promote_frame(), **{**SHIPPED, **override})
+
+
+@pytest.mark.parametrize("override, match", [
+    ({"alpha": 10 ** 400}, r"ab_testing\.alpha "),
+    ({"class_prior": {k: 10 ** 308 for k in range(11)}}, r"\.class_prior shares"),
+    ({"noninferiority_margin": 1e-310}, "floor is not finite"),
+    ({"min_detectable_gain": 1e-160}, "planned size is not finite"),
+])
+def test_absurd_thresholds_raise_valueerror(override, match):
+    # They overflowed: OverflowError from math.isfinite, float() or int(inf).
+    with pytest.raises(ValueError, match=match):
         verdict_of(promote_frame(), **{**SHIPPED, **override})
 
 

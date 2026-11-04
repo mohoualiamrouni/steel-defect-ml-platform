@@ -183,6 +183,8 @@ def test_unknown_promotion_key_raises(tmp_path):
     ({"expected_classes": list(range(11)), "class_prior": {k: 0.0 for k in range(11)}},
      "class_prior"),
     ({"expected_classes": [0, "1"]}, "expected_classes"),
+    ({"expected_classes": list(range(11)), "class_prior": {k: 10 ** 308 for k in range(11)}},
+     "class_prior"),
     ({"require_no_class_regression": 1}, "require_no_class_regression"),
 ])
 def test_promotion_ranges(tmp_path, promotion, key):

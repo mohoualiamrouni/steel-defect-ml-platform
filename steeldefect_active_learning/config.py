@@ -289,7 +289,12 @@ class PipelineConfig:
 # ---------------------------------------------------------------------------
 
 def _is_number(x: Any) -> bool:
-    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+    if not isinstance(x, (int, float)) or isinstance(x, bool):
+        return False
+    try:
+        return math.isfinite(x)
+    except OverflowError:       # an int beyond the float range
+        return False
 
 
 def _is_class_id(x: Any) -> bool:
@@ -355,7 +360,8 @@ def check_gate_thresholds(
             raise ValueError(f"{p}class_prior keys must be exactly expected_classes (int or "
                              f"str class ids)")
         values = list(class_prior.values())
-        if not all(_is_number(v) and v >= 0 for v in values) or not 0 < sum(values) < math.inf:
+        if (not all(_is_number(v) and v >= 0 for v in values)
+                or not 0 < sum(float(v) for v in values) < math.inf):
             raise ValueError(f"{p}class_prior shares must be numbers >= 0 with a positive, "
                              f"finite sum")
     if false_alarm_margin is not None and not (_is_number(false_alarm_margin)

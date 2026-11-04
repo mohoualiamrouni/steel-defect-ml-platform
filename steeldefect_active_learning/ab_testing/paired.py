@@ -674,7 +674,8 @@ def noninferiority_floor(margin: float, alpha: float, *, cc: int = CONTINUITY_AD
     """Smallest class size at which a class with no discordant image passes ``-margin``.
 
     A smaller class can still pass when B wins enough of its discordant images; a larger
-    one can fail. For 0 < alpha <= 0.5.
+    one can fail. For 0 < alpha <= 0.5; raises ValueError when the margin is so small that
+    the floor is not finite.
 
     At n10 = n01 = 0 and d0 = -m, Z = (n m - cc) / sqrt(n m (1 - m)); with
     k = z^2 (1 - m), the class passes once n m exceeds the larger root of
@@ -686,6 +687,8 @@ def noninferiority_floor(margin: float, alpha: float, *, cc: int = CONTINUITY_AD
     k = z * z * (1.0 - margin)
     b = 2.0 * cc + k
     r = (b + math.sqrt(b * b - 4.0 * cc * cc)) / 2.0
+    if not math.isfinite(r / margin):
+        raise ValueError(f"margin {margin} is too small: its floor is not finite")
     return int(math.floor(r / margin)) + 1
 
 
@@ -747,7 +750,8 @@ def planning_n(psi: float, delta1: float, d0: float, alpha: float, power: float)
         The number of images, or None when the alternative is impossible
         (psi < |delta1|, psi outside (0, 1], or delta1 <= d0).
 
-    Raises ValueError unless 0 < alpha <= 0.5 and 0 < power < 1.
+    Raises ValueError unless 0 < alpha <= 0.5 and 0 < power < 1, and when delta1 - d0 is so
+    small that the planned size is not finite.
     """
     z_alpha = _check_alpha(alpha)
     if not 0.0 < power < 1.0:
@@ -760,7 +764,11 @@ def planning_n(psi: float, delta1: float, d0: float, alpha: float, power: float)
     s0 = math.sqrt(max(2.0 * q + d0 * (1.0 - d0), 0.0))
     s1 = math.sqrt(max(psi - delta1 * delta1, 0.0))
     z_power = float(stats.norm.ppf(power))
-    return int(math.ceil((z_alpha * s0 + z_power * s1) ** 2 / (delta1 - d0) ** 2))
+    size = (z_alpha * s0 + z_power * s1) ** 2 / (delta1 - d0) ** 2
+    if not math.isfinite(size):
+        raise ValueError(f"delta1 - d0 = {delta1 - d0} is too small: the planned size is not "
+                         f"finite")
+    return int(math.ceil(size))
 
 
 def posterior_b_better(n10: int, n01: int) -> float:
