@@ -55,6 +55,12 @@ SCHEMA = "paired_counts/1"
 CELLS = ("both_correct", "only_a_correct", "only_b_correct", "both_wrong")   # n11, n10, n01, n00
 FA_CELLS = ("both_alarm", "only_a_alarm", "only_b_alarm", "neither_alarm")  # f11, f10, f01, f00
 ID_CANDIDATES = ("segmentation_id", "image_id", "image_path")
+_INT64_MAX = 2 ** 63 - 1
+# Largest slice a block may describe. On balanced counts, the binomial and beta tails of
+# scipy 1.15, which the gate reports, stay within 1e-7 of their exact values up to 1e10
+# discordant images, and are off by 3e-4 at 2e13 (scipy 1.18: 1e-9); from 2^64 discordant
+# images, the binomial tail raises.
+MAX_IMAGES = 10 ** 9
 # One count subtracted from the score numerator of every decision bound. In every
 # configuration checked by exact enumeration, for alpha from 0.025 to 0.45, it keeps the
 # size of each clause at or below alpha, except when every image of a class is discordant
@@ -77,8 +83,12 @@ def _repeated_columns(df: pd.DataFrame) -> List[str]:
 
 
 def _unhashable(s: pd.Series) -> int:
-    """How many values cannot be hashed (lists, dicts, arrays), which pandas cannot compare."""
-    if s.dtype != object:
+    """How many values cannot be hashed (lists, dicts, arrays), which pandas cannot compare.
+
+    Every dtype but the numeric and boolean ones is checked: object columns, and Arrow
+    list or struct columns, can hold such values.
+    """
+    if pd.api.types.is_numeric_dtype(s.dtype) or pd.api.types.is_bool_dtype(s.dtype):
         return 0
     count = 0
     for v in s.to_numpy(dtype=object):
@@ -87,6 +97,15 @@ def _unhashable(s: pd.Series) -> int:
         except TypeError:
             count += 1
     return count
+
+
+def _guarded(check: Any, s: pd.Series, name: str, errors: List[str]) -> Any:
+    """Run a column check; values it cannot even inspect are an error, never an exception."""
+    try:
+        return check(s, name, errors)
+    except Exception as exc:  # noqa: BLE001 — bad data is listed, never raised
+        errors.append(f"{name}: values cannot be checked ({type(exc).__name__})")
+        return None
 
 
 def _class_values(s: pd.Series, name: str, errors: List[str]) -> Optional[np.ndarray]:
@@ -99,11 +118,17 @@ def _class_values(s: pd.Series, name: str, errors: List[str]) -> Optional[np.nda
         errors.append(f"{name}: boolean values are not class ids")
         return None
     if pd.api.types.is_integer_dtype(s):
+        if pd.api.types.is_unsigned_integer_dtype(s) and len(s) and int(s.max()) > _INT64_MAX:
+            errors.append(f"{name}: class ids outside the int64 range")
+            return None
         return s.to_numpy(dtype=np.int64)
     if pd.api.types.is_float_dtype(s):
         values = s.to_numpy(dtype=float)
         if not np.all(np.isfinite(values)) or not np.all(values == np.round(values)):
             errors.append(f"{name}: non-integral float values")
+            return None
+        if np.any(np.abs(values) >= 2.0 ** 63):     # astype would wrap them silently
+            errors.append(f"{name}: class ids outside the int64 range")
             return None
         return values.astype(np.int64)
     values = s.to_numpy(dtype=object)
@@ -132,6 +157,49 @@ def _correct_values(s: pd.Series, name: str, errors: List[str]) -> Optional[np.n
     return None
 
 
+def _check_ids(ids: pd.Series, name: str, errors: List[str]) -> None:
+    """Identifiers: none missing, all hashable, none repeated."""
+    missing = int(ids.isna().sum())
+    if missing:
+        errors.append(f"{name}: {missing} missing identifier(s)")
+    unhashable = _unhashable(ids)
+    if unhashable:
+        errors.append(f"{name}: {unhashable} unhashable value(s)")
+        return
+    duplicated = int(ids.duplicated().sum())
+    if duplicated:
+        errors.append(f"{name}: {duplicated} duplicated row(s) "
+                      f"({int(ids.nunique())} unique of {len(ids)})")
+
+
+def _check_clusters(clusters: pd.Series, name: str, errors: List[str]) -> None:
+    """Clusters: none missing, all hashable, one image per cluster."""
+    missing = int(clusters.isna().sum())
+    if missing:
+        errors.append(f"{name}: {missing} missing value(s)")
+    unhashable = _unhashable(clusters)
+    if unhashable:
+        errors.append(f"{name}: {unhashable} unhashable value(s)")
+    elif int(clusters.duplicated().sum()):
+        errors.append(f"{name}: {int(clusters.nunique())} clusters hold {len(clusters)} rows; "
+                      f"the paired tests need one image per cluster")
+
+
+def _class_names(labels: np.ndarray, s: pd.Series, name: str, class_col: str,
+                 errors: List[str]) -> Dict[Any, Optional[str]]:
+    """Display names, one-to-one with the classes on the named ones (a class may have none)."""
+    unhashable = _unhashable(s)
+    if unhashable:
+        errors.append(f"{name}: {unhashable} unhashable value(s)")
+        return {}
+    pairs = pd.DataFrame({"k": labels, "v": s.to_numpy(dtype=object)}).drop_duplicates()
+    named = pairs.dropna(subset=["v"])      # two unnamed classes share no name
+    if pairs["k"].duplicated().any() or named["v"].duplicated().any():
+        errors.append(f"{name} is not one-to-one with {class_col}")
+        return {}
+    return {_py(k): (None if pd.isna(v) else str(v)) for k, v in zip(pairs["k"], pairs["v"])}
+
+
 def _validated(df: pd.DataFrame, class_col: str, *, require_labels: bool) -> Dict[str, Any]:
     """Validate labels, predictions and correctness; arrays are positional."""
     out: Dict[str, Any] = {"labels": None, "pred_a": None, "pred_b": None, "correct_a": None,
@@ -144,7 +212,7 @@ def _validated(df: pd.DataFrame, class_col: str, *, require_labels: bool) -> Dic
     cols = set(df.columns)
     labels = correct_a = correct_b = source = None
     if class_col in cols:
-        labels = _class_values(df[class_col], class_col, errors)
+        labels = _guarded(_class_values, df[class_col], class_col, errors)
     elif require_labels:
         errors.append(f"class column '{class_col}' is missing")
     has_pred = {"pred_a", "pred_b"} <= cols
@@ -152,7 +220,7 @@ def _validated(df: pd.DataFrame, class_col: str, *, require_labels: bool) -> Dic
     values: Dict[str, Optional[np.ndarray]] = {}
     if has_pred and class_col in cols:      # checked even when the labels are invalid
         for name in ("pred_a", "pred_b"):
-            v = _class_values(df[name], name, errors)
+            v = _guarded(_class_values, df[name], name, errors)
             if (v is not None and labels is not None
                     and (labels.dtype == object) != (v.dtype == object)):
                 errors.append(f"{name} and {class_col} use different encodings")
@@ -163,8 +231,8 @@ def _validated(df: pd.DataFrame, class_col: str, *, require_labels: bool) -> Dic
         correct_a, correct_b = pred_a == labels, pred_b == labels
         source = "pred_vs_label"
     if has_corr:
-        xa = _correct_values(df["correct_a"], "correct_a", errors)
-        xb = _correct_values(df["correct_b"], "correct_b", errors)
+        xa = _guarded(_correct_values, df["correct_a"], "correct_a", errors)
+        xb = _guarded(_correct_values, df["correct_b"], "correct_b", errors)
         if xa is not None and xb is not None:
             if correct_a is not None:
                 k = int(np.sum((xa != correct_a) | (xb != correct_b)))
@@ -289,49 +357,19 @@ def paired_counts(
         errors.append(f"no identifier column (looked for {id_col or list(ID_CANDIDATES)})")
     else:
         out["id_col"] = str(id_col)
-        ids = df[id_col]
-        missing = int(ids.isna().sum())
-        if missing:
-            errors.append(f"{id_col}: {missing} missing identifier(s)")
-        unhashable = _unhashable(ids)
-        if unhashable:
-            errors.append(f"{id_col}: {unhashable} unhashable value(s)")
-        else:
-            duplicated = int(ids.duplicated().sum())
-            if duplicated:
-                errors.append(f"{id_col}: {duplicated} duplicated row(s) "
-                              f"({int(ids.nunique())} unique of {n_rows})")
+        _guarded(_check_ids, df[id_col], str(id_col), errors)
     if cluster_col is not None:
         if cluster_col not in cols:
             errors.append(f"cluster column '{cluster_col}' is missing")
         else:
-            clusters = df[cluster_col]
-            missing = int(clusters.isna().sum())
-            if missing:
-                errors.append(f"{cluster_col}: {missing} missing value(s)")
-            unhashable = _unhashable(clusters)
-            if unhashable:
-                errors.append(f"{cluster_col}: {unhashable} unhashable value(s)")
-            elif int(clusters.duplicated().sum()):
-                errors.append(f"{cluster_col}: {int(clusters.nunique())} clusters hold "
-                              f"{n_rows} rows; the paired tests need one image per cluster")
+            _guarded(_check_clusters, df[cluster_col], str(cluster_col), errors)
     v = _validated(df, class_col, require_labels=True)
     errors.extend(v["errors"])
     labels = v["labels"]
     names: Dict[Any, Optional[str]] = {}
     if labels is not None and name_col and name_col in cols:
-        unhashable = _unhashable(df[name_col])
-        if unhashable:
-            errors.append(f"{name_col}: {unhashable} unhashable value(s)")
-        else:
-            pairs = pd.DataFrame({"k": labels, "v": df[name_col].to_numpy(dtype=object)})
-            pairs = pairs.drop_duplicates()
-            named = pairs.dropna(subset=["v"])      # two unnamed classes share no name
-            if pairs["k"].duplicated().any() or named["v"].duplicated().any():
-                errors.append(f"{name_col} is not one-to-one with {class_col}")
-            else:
-                names = {_py(k): (None if pd.isna(name) else str(name))
-                         for k, name in zip(pairs["k"], pairs["v"])}
+        names = _guarded(lambda s, name, errs: _class_names(labels, s, name, class_col, errs),
+                         df[name_col], name_col, errors) or {}
     if errors:
         return out
 
@@ -383,8 +421,8 @@ def paired_counts_errors(block: Any) -> List[str]:
 
     Never raises. Returns an empty list for a valid, internally consistent block:
 
-    - the cells are non-negative integers summing to ``n > 0``, and ``id_col`` is a
-      string or null;
+    - the cells are non-negative integers summing to ``n``, with 0 < n <= MAX_IMAGES,
+      ``errors`` is an empty list and ``id_col`` a string or null;
     - every ``per_class`` row is a mapping with a new plain int or str class, a name that
       is a string or null, and cells summing to its ``n > 0`` (an absent class has no
       row); the rows' cells sum to the overall ones;
@@ -392,32 +430,44 @@ def paired_counts_errors(block: Any) -> List[str]:
       with one row per labelled class (and per class only predicted), each covering the
       ``n_other`` images whose label is not its class. A's alarms add up to A's wrong
       predictions, and B's to B's: each wrong prediction is one false alarm into the
-      class it predicts, so a missing or emptied row cannot go unnoticed.
+      class it predicts, so a deleted or emptied row cannot go unnoticed. No row has
+      more alarms than wrong predictions on the images of other classes, and the alarms
+      both models raise together never outnumber the images both get wrong.
+
+    Counts cannot show which class a model predicted: moving alarms from one row to
+    another keeps every rule, and describes another, internally consistent frame.
+    Blocks are read back from JSON; other containers, such as the numpy arrays of a
+    parquet round trip, are rejected.
     """
     if not isinstance(block, Mapping):
         return ["paired_counts block missing"]
     errors: List[str] = []
-    if block.get("schema") != SCHEMA:
-        errors.append(f"paired_counts schema {block.get('schema')!r} != {SCHEMA!r}")
+    schema = block.get("schema")
+    if not (isinstance(schema, str) and schema == SCHEMA):
+        errors.append(f"paired_counts schema {schema!r} != {SCHEMA!r}")
+    listed = block.get("errors")
     if block.get("valid") is not True:
-        listed = block.get("errors")
         if isinstance(listed, list) and listed:
             return errors + [str(e) for e in listed]
         return errors + ["paired_counts marked invalid"]
-    if block.get("errors"):
+    if not (listed is None or isinstance(listed, list)):
+        errors.append("paired_counts.errors must be a list")
+    elif listed:
         errors.append("paired_counts marked valid but lists errors")
     if not _is_name(block.get("id_col")):
         errors.append("paired_counts.id_col must be a string or null")
     cells, n = [block.get(c) for c in CELLS], block.get("n")
     if not all(_is_count(x) for x in cells) or not _is_count(n):
         return errors + ["paired_counts cells must be non-negative integers"]
+    if n > MAX_IMAGES:
+        return errors + [f"paired_counts: n = {n} images exceeds the supported {MAX_IMAGES}"]
     if sum(cells) != n or n == 0:
         errors.append(f"paired_counts: cells sum to {sum(cells)}, n = {n}")
     rows = block.get("per_class")
     if not isinstance(rows, list) or not rows:
         return errors + ["paired_counts.per_class missing or empty"]
     seen: set = set()
-    totals, n_per_class = [0, 0, 0, 0], {}
+    totals, n_per_class, cells_by_class = [0, 0, 0, 0], {}, {}
     for i, row in enumerate(rows):
         if not isinstance(row, Mapping):
             errors.append(f"paired_counts.per_class[{i}] is not a mapping")
@@ -437,6 +487,7 @@ def paired_counts_errors(block: Any) -> List[str]:
                           f"summing to n > 0")
             continue
         n_per_class[k] = row["n"]
+        cells_by_class[k] = row_cells
         totals = [t + x for t, x in zip(totals, row_cells)]
     if totals != cells:
         errors.append(f"paired_counts: per-class cells sum to {totals}, overall {cells}")
@@ -450,7 +501,9 @@ def paired_counts_errors(block: Any) -> List[str]:
     if not isinstance(alarms, list):
         return errors
     seen_alarm: set = set()
-    alarms_a = alarms_b = 0
+    alarms_a = alarms_b = alarms_both = 0
+    wrong_a = block["only_b_correct"] + block["both_wrong"]
+    wrong_b = block["only_a_correct"] + block["both_wrong"]
     for i, row in enumerate(alarms):
         if not isinstance(row, Mapping):
             errors.append(f"paired_counts.per_predicted_class[{i}] is not a mapping")
@@ -469,17 +522,25 @@ def paired_counts_errors(block: Any) -> List[str]:
             errors.append(f"paired_counts.per_predicted_class[{i}] (class {k!r}): alarm cells "
                           f"must be counts summing to n_other = {n_other}")
             continue
-        alarms_a += row["both_alarm"] + row["only_a_alarm"]
-        alarms_b += row["both_alarm"] + row["only_b_alarm"]
+        both, a, b = row["both_alarm"], row["only_a_alarm"], row["only_b_alarm"]
+        _, k10, k01, k00 = cells_by_class.get(k, [0, 0, 0, 0])
+        if (both + a > wrong_a - k01 - k00 or both + b > wrong_b - k10 - k00
+                or both > block["both_wrong"] - k00):
+            errors.append(f"paired_counts.per_predicted_class[{i}] (class {k!r}): more alarms "
+                          f"than wrong predictions on the images of other classes")
+        alarms_a += both + a
+        alarms_b += both + b
+        alarms_both += both
     unlisted = [k for k in n_per_class if k not in seen_alarm]
     if unlisted:
         errors.append(f"paired_counts.per_predicted_class has no row for labelled classes "
                       f"{_cut(unlisted)}")
-    wrong_a = block["only_b_correct"] + block["both_wrong"]
-    wrong_b = block["only_a_correct"] + block["both_wrong"]
     if (alarms_a, alarms_b) != (wrong_a, wrong_b):
         errors.append(f"paired_counts.per_predicted_class: A and B have {alarms_a} and "
                       f"{alarms_b} false alarms, but {wrong_a} and {wrong_b} wrong predictions")
+    if alarms_both > block["both_wrong"]:
+        errors.append(f"paired_counts.per_predicted_class: both models raise {alarms_both} "
+                      f"alarms together, on only {block['both_wrong']} images both get wrong")
     return errors
 
 

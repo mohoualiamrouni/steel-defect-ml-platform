@@ -453,7 +453,7 @@ def _contract_violations(demo: pd.DataFrame):
     cases.append(("text predictions, integer labels", demo.assign(pred_a=demo["pred_name_a"]),
                   "pred_a and label use different encodings"))
     names = demo.copy()
-    names.loc[names.index[0], "label_name"] = "pit"
+    names.loc[names.index[0], "label_name"] = "scratch_bis"     # a new name: one half only
     cases.append(("two names for one class", names, "label_name is not one-to-one with label"))
     shared = demo.copy()
     shared.loc[shared["label"] == 1, "label_name"] = "scratch"
@@ -540,6 +540,9 @@ def test_cluster_column_needs_one_image_per_cluster(demo):
     errors = paired.paired_counts(shared, cluster_col="coil")["errors"]
     assert errors == ["coil: 1099 clusters hold 1100 rows; the paired tests need one image per cluster"]
     assert paired.paired_counts(demo, cluster_col="coil")["errors"] == ["cluster column 'coil' is missing"]
+    one_missing = unique.astype({"coil": object})
+    one_missing.loc[one_missing.index[4], "coil"] = None
+    assert paired.paired_counts(one_missing, cluster_col="coil")["errors"] == ["coil: 1 missing value(s)"]
 
 
 def test_resolve_correctness_needs_labels_only_for_predictions():
@@ -667,6 +670,10 @@ def test_repeated_or_bad_classes_and_empty_rows(demo):
     {"id_col": ["image_path"]},
     {"n": None},
     {"n": float("nan")},
+    {"errors": np.array([], dtype=object)},
+    {"errors": pd.Series([], dtype=object)},
+    {"schema": np.array(["paired_counts/1", "x"])},
+    {"per_class": np.array([1, 2])},
 ])
 def test_paired_counts_errors_never_raise(demo, change):
     errors = paired.paired_counts_errors({**paired.paired_counts(demo), **change})
@@ -685,3 +692,78 @@ def test_names_must_be_strings_or_null(demo):
         "paired_counts.per_predicted_class[2] (class 2): name must be a string or null"]
     unnamed = [dict(r, name=None) for r in good["per_class"]]
     assert paired.paired_counts_errors({**good, "per_class": unnamed}) == []
+
+
+def test_a_parquet_round_trip_is_rejected_not_raised(demo):
+    # Arrow turns the block's lists into numpy arrays; the block is read back from JSON only.
+    pa = pytest.importorskip("pyarrow")
+    block = pa.Table.from_pylist([paired.paired_counts(demo)]).to_pandas().to_dict(orient="records")[0]
+    errors = paired.paired_counts_errors(block)
+    assert "paired_counts.errors must be a list" in errors
+    assert "paired_counts.per_class missing or empty" in errors
+
+
+def _scaled(block, factor):
+    """Every count of a block times factor: each rule of the validator still holds."""
+    def scale(row):
+        return {k: v * factor if k in paired.CELLS + paired.FA_CELLS + ("n", "n_other", "n_rows")
+                else v for k, v in row.items()}
+    return {**scale(block), "per_class": [scale(r) for r in block["per_class"]],
+            "per_predicted_class": [scale(r) for r in block["per_predicted_class"]]}
+
+
+def test_counts_beyond_the_supported_size(demo):
+    good = paired.paired_counts(demo)
+    assert paired.paired_counts_errors(_scaled(good, 10 ** 5)) == []     # 110 million images
+    assert paired.paired_counts_errors(_scaled(good, 10 ** 7)) == [
+        "paired_counts: n = 11000000000 images exceeds the supported 1000000000"]
+
+
+def test_class_ids_outside_the_int64_range(demo):
+    df = demo.drop(columns=["label_name"]).assign(label=demo["label"] * 1e19 + 1e19,
+                                                  pred_a=demo["pred_a"] * 1e19 + 1e19,
+                                                  pred_b=demo["pred_b"] * 1e19 + 1e19)
+    assert "label: class ids outside the int64 range" in paired.paired_counts(df)["errors"]
+    big = demo.drop(columns=["label_name"]).astype({"label": np.uint64, "pred_a": np.uint64,
+                                                    "pred_b": np.uint64})
+    assert paired.paired_counts(big)["valid"] is True
+    big.loc[big.index[0], "label"] = np.uint64(2 ** 64 - 1)
+    assert "label: class ids outside the int64 range" in paired.paired_counts(big)["errors"]
+
+
+def test_values_that_pandas_cannot_compare(demo):
+    from decimal import Decimal
+    odd = demo.astype({"image_path": object})
+    odd.loc[odd.index[3], "image_path"] = Decimal("sNaN")       # isna() raises on it
+    assert paired.paired_counts(odd)["errors"] == ["image_path: values cannot be checked "
+                                                   "(InvalidOperation)"]
+    pa = pytest.importorskip("pyarrow")
+    lists = pd.Series([[i] for i in range(len(demo))], dtype=pd.ArrowDtype(pa.list_(pa.int64())))
+    assert paired.paired_counts(demo.assign(image_path=lists))["errors"] == [
+        "image_path: 1100 unhashable value(s)"]
+    coil = paired.paired_counts(demo.assign(coil=lists), cluster_col="coil")["errors"]
+    assert coil == ["coil: 1100 unhashable value(s)"]
+    names = pd.Series([[n] for n in demo["label_name"]], dtype=pd.ArrowDtype(pa.list_(pa.string())))
+    assert paired.paired_counts(demo.assign(label_name=names))["errors"] == [
+        "label_name: 1100 unhashable value(s)"]
+
+
+def test_alarms_beyond_the_wrong_predictions_of_other_classes():
+    # Two classes; B's 10 wrong predictions on class-0 images listed as alarms into class 0.
+    rows = [{"class": 0, "name": None, "n": 50, "both_correct": 40, "only_a_correct": 10,
+             "only_b_correct": 0, "both_wrong": 0},
+            {"class": 1, "name": None, "n": 50, "both_correct": 50, "only_a_correct": 0,
+             "only_b_correct": 0, "both_wrong": 0}]
+    genuine = [{"class": 0, "name": None, "n_other": 50, "both_alarm": 0, "only_a_alarm": 0,
+                "only_b_alarm": 0, "neither_alarm": 50},
+               {"class": 1, "name": None, "n_other": 50, "both_alarm": 0, "only_a_alarm": 0,
+                "only_b_alarm": 10, "neither_alarm": 40}]
+    block = {"schema": paired.SCHEMA, "valid": True, "errors": [], "id_col": "image_path",
+             "predictions_available": True, "n": 100, "both_correct": 90, "only_a_correct": 10,
+             "only_b_correct": 0, "both_wrong": 0, "per_class": rows, "per_predicted_class": genuine}
+    assert paired.paired_counts_errors(block) == []
+    moved = [dict(genuine[0], only_b_alarm=10, neither_alarm=40), dict(genuine[1], only_b_alarm=0,
+                                                                       neither_alarm=50)]
+    assert paired.paired_counts_errors({**block, "per_predicted_class": moved}) == [
+        "paired_counts.per_predicted_class[0] (class 0): more alarms than wrong predictions on "
+        "the images of other classes"]

@@ -430,6 +430,24 @@ def test_incomplete_or_malformed_blocks_keep_a():
         _assert_invalid(decide_promotion({"paired_counts": block}, **thresholds))
 
 
+def test_alarms_moved_into_the_common_cell_are_caught():
+    # G3 with B's 40 coil_break alarms relabelled as alarms of both models, and as many of
+    # A's alarms removed elsewhere to keep its total: the veto then sees no increase.
+    g3 = paired.paired_counts(_g3_frame(concentrated=True))
+    alarms = [dict(r) for r in g3["per_predicted_class"]]
+    five = next(r for r in alarms if r["class"] == 5)
+    moved = five["only_b_alarm"]
+    five.update(both_alarm=five["both_alarm"] + moved, only_b_alarm=0)
+    for r in [r for r in alarms if r["class"] != 5][:10]:
+        r.update(only_a_alarm=r["only_a_alarm"] - moved // 10,
+                 neither_alarm=r["neither_alarm"] + moved // 10)
+    block = {**g3, "per_predicted_class": alarms}
+    assert paired.paired_counts_errors(block) == [
+        "paired_counts.per_predicted_class: both models raise 140 alarms together, on only "
+        "100 images both get wrong"]
+    _assert_invalid(decide_promotion({"paired_counts": block}, **{**SLICE, "class_margins": {}}))
+
+
 def test_contract_violations_keep_a():
     df = promote_frame()
     # B identical to A, with correct_a coded 0/2: read as 0/1 it would be all wrong for A.
