@@ -16,8 +16,9 @@ def ab_df_classification(rng):
     """Synthetic A/B classification DataFrame with ground truth.
 
     Constructs:
-      - 500 images, 11 classes (taxonomy cardinality).
-      - Model A is slightly worse than Model B by ΔIoU = +0.03 on classes 0..7.
+      - 500 images over 11 classes (taxonomy cardinality), no IoU column.
+      - A is right on about 80 % of the images and B on about 85 % (realised 0.784 and
+        0.856), errors drawn independently.
       - Confidence distributions are Beta-shaped with arm-specific means.
     """
     n = 500
@@ -55,11 +56,37 @@ def ab_df_classification(rng):
 
 
 @pytest.fixture
-def ab_df_balanced(rng):
-    """A/B df where the two arms are statistically identical (null case).
+def ab_df_paired_null(rng):
+    """A paired null for correctness: A and B equally accurate on the same images.
 
-    Used to verify that p-values are uniform under H0 and that SRM does not
-    fire on a 50/50 split.
+    2,200 images, 200 per class over 11 classes. A and B are each right on about 85 % of
+    the images, with independent errors, so about a quarter of the images are discordant
+    and neither model is better.
+    """
+    n_per_class, n_classes = 200, 11
+    labels = np.repeat(np.arange(n_classes), n_per_class)
+    n = len(labels)
+    preds = []
+    for _ in range(2):
+        pred = labels.copy()
+        wrong = rng.random(n) < 0.15
+        pred[wrong] = (pred[wrong] + rng.integers(1, n_classes, size=int(wrong.sum()))) % n_classes
+        preds.append(pred)
+    return pd.DataFrame({
+        "image_path": [f"img_{i:05d}.png" for i in range(n)],
+        "label":      labels,
+        "pred_a":     preds[0],
+        "pred_b":     preds[1],
+    })
+
+
+@pytest.fixture
+def ab_df_balanced(rng):
+    """A/B df that is a null case only for the confidence columns.
+
+    The confidences of A and B are drawn from the same distribution. The labels copy
+    pred_a, so A is the oracle (accuracy 1.0 against about 0.95 for B): not a null for
+    correctness.
     """
     n = 400
     a = rng.normal(0.7, 0.15, size=n).clip(0, 1)

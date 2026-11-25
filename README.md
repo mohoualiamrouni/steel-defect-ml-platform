@@ -11,7 +11,7 @@ profiles.
 
 | Pipeline | What it does | Code |
 |---|---|---|
-| **P1: Active learning and A/B** | select the most informative images to label; decide model promotion with a fail-closed statistical gate | `steeldefect_active_learning/` |
+| **P1: Active learning and A/B** | select the most informative images to label; decide model promotion with a paired, fail-closed statistical gate (`ab_testing/promotion.py`), a library function that neither the CLI pipeline nor the Databricks bundle runs yet | `steeldefect_active_learning/` |
 | **P2: Defect regrouping** | fuse CNN and morphology features, discover defect families (mini-batch k-means by default; GMM, HDBSCAN, DP-GMM and a lightweight DeepDPM re-implementation as options) | `defect_clustering/` |
 | **P3: Datamining and cutting** | severity regression (XGBoost with conformalized quantile regression), then a guillotine cutting-plan optimizer | `datamining/` |
 | **P4: Self-supervised core** | self-supervised contrastive encoder (SimCLR / NT-Xent; an optional SimSiam comparison is off by default), open-set detection, generalized category discovery, continual NCM | `steeldefect_ssl/` |
@@ -112,6 +112,13 @@ simplified stand-in notebooks rather than the tested package (the A/B stand-in o
 registers two model versions and runs no A/B test); the header of `databricks.yml`
 explains why. At-scale Spark/Delta runs, real-data and GPU training,
 Unity Catalog governance and live dashboards are the next steps.
+
+The A/B promotion gate assumes what it cannot check: the images of the evaluation slice
+are independent (one image per coil, or a cluster column with one image per cluster), the
+labels of the images on which A and B disagree were checked without seeing the model
+outputs, the slice was fixed before the models were scored, and `class_prior` describes
+the deployment stream. The shipped `class_prior` is the calibrated-synthetic prior of the
+P1 image generator, not plant data.
 
 ## Layout
 

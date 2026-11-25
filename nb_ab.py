@@ -7,8 +7,9 @@
 # MAGIC
 # MAGIC Deliberately **no accuracy metric**: the models are trained on
 # MAGIC calibrated-synthetic embeddings, so any accuracy here is a property of the
-# MAGIC data generator, not a result. The promotion *decision* is governed by the
-# MAGIC 7-criterion A/B gate (see report `sec:res_h1`), and real model performance
+# MAGIC data generator, not a result. The promotion *decision* belongs to the paired
+# MAGIC A/B gate of the package (`steeldefect_active_learning/ab_testing/promotion.py`),
+# MAGIC which this notebook does not run, and real model performance
 # MAGIC is reported in H1-H4 by the actual pipelines. The only thing logged here is
 # MAGIC the factual `n_train` difference between the two versions.
 

@@ -281,39 +281,19 @@ def _page_cover(pdf, df, stat, pwr, dr, name_a, name_b, task, alpha):
     fig.text(0.5, 0.16, f"B (challenger): {name_b}",
              ha="center", fontsize=9, color=_DARK)
 
-    # Go/no-go deployment recommendation
-    try:
-        per_class = df.groupby("label").apply(
-            lambda g: (g["pred_a"] == g["pred_b"]).mean()
-        )
-        min_agreement = float(per_class.min())
-    except Exception:
-        min_agreement = 1.0
-
-    overall_agreement = 1.0 - dr
-    if min_agreement < 0.80:
-        verdict      = f"STOP  —  per-class agreement < 80 % on ≥ 1 class"
-        verdict_color = _RED
-    elif overall_agreement >= 0.95:
-        verdict      = "GO  —  overall agreement ≥ 95 %"
-        verdict_color = _GREEN
-    elif dr < 0.10:
-        verdict      = "LIKELY GO  —  low disagreement rate"
-        verdict_color = _ORANGE
-    else:
-        verdict      = "REVIEW  —  spot-check disagreement cases before deploying"
-        verdict_color = _ORANGE
-
+    # The promotion decision belongs to the gate (ab_testing.promotion), which reads
+    # paired correctness; agreement between A and B says nothing about which is right.
     ax_v = fig.add_axes([0.08, 0.05, 0.84, 0.07])
-    ax_v.set_facecolor(verdict_color)
+    ax_v.set_facecolor(_GREY)
     ax_v.set_xlim(0, 1); ax_v.set_ylim(0, 1)
     ax_v.set_xticks([]); ax_v.set_yticks([])
     for spine in ax_v.spines.values():
         spine.set_visible(False)
-    ax_v.text(0.5, 0.55, "Deployment Recommendation", ha="center", va="center",
+    ax_v.text(0.5, 0.55, "Promotion verdict", ha="center", va="center",
               fontsize=8, color="white", transform=ax_v.transAxes)
-    ax_v.text(0.5, 0.20, verdict, ha="center", va="center",
-              fontsize=11, fontweight="bold", color="white", transform=ax_v.transAxes)
+    ax_v.text(0.5, 0.20, "Not computed in this report: see ab_testing.promotion.decide_promotion",
+              ha="center", va="center", fontsize=10, fontweight="bold", color="white",
+              transform=ax_v.transAxes)
 
     pdf.savefig(fig, bbox_inches="tight")
     plt.close(fig)

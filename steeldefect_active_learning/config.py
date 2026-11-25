@@ -11,10 +11,16 @@ Usage:
 
 from __future__ import annotations
 
+import dataclasses
+import math
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, Dict, List, Mapping, Optional, Union
 import yaml
+
+# The YAML shipped with the package, next to this module.
+SHIPPED_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "config", "pipeline_config.yaml")
 
 
 # ---------------------------------------------------------------------------
@@ -62,49 +68,83 @@ class ActiveLearningConfig:
 class PromotionConfig:
     """Thresholds of the A/B promotion gate (``ab_testing.promotion.decide_promotion``).
 
+    Field names are the keyword arguments of ``decide_promotion``; the gate's level is
+    ``ab_testing.alpha``. None for expected_classes or class_prior means not configured:
+    the gate keeps A.
+
     Attributes:
-        min_cohens_d:         Minimum |Cohen's d| for the difference to count.
-        bayesian_threshold:   Minimum Bayesian P(B more accurate than A).
-        no_class_regression:  Veto promotion if any class significantly regresses.
+        min_gain:                    Superiority: the lower bound of acc_B - acc_A at the
+                                     class prior must exceed it.
+        noninferiority_margin:       Default per-class margin m: a class passes when the
+                                     lower bound of recall_B - recall_A exceeds -m.
+        class_margins:               Per-class margins, by class id.
+        expected_classes:            The class taxonomy. A class absent from the slice fails
+                                     no_class_regression, and leaves the prior-weighted
+                                     estimand not estimable when its prior share is positive.
+        class_prior:                 Deployment class shares (renormalised), or "slice" to
+                                     certify the slice's own class mix.
+        false_alarm_margin:          Veto a class when B adds false alarms into it, at level
+                                     alpha, beyond this rate; null disables the clause.
+        class_false_alarm_margins:   Per-class false-alarm margins.
+        min_detectable_gain:         Plan: the gain (accuracy units) the superiority clause
+                                     must detect.
+        planning_discordance:        Plan: the assumed share of images on which exactly one
+                                     model is right.
+        power:                       Plan: power of the superiority clause (enforced by
+                                     sample_size), and of all the per-class clauses together
+                                     (their planned sizes are only warned about).
+        require_no_class_regression: Enforce the per-class clause.
     """
-    min_cohens_d: float = 0.2
-    bayesian_threshold: float = 0.95
-    no_class_regression: bool = True
+    min_gain: float = 0.0
+    noninferiority_margin: float = 0.05
+    class_margins: Dict[Union[int, str], float] = field(default_factory=dict)
+    expected_classes: Optional[List[Union[int, str]]] = None
+    class_prior: Optional[Union[str, Dict[Union[int, str], float]]] = None
+    false_alarm_margin: Optional[float] = 0.005
+    class_false_alarm_margins: Dict[Union[int, str], float] = field(default_factory=dict)
+    min_detectable_gain: float = 0.02
+    planning_discordance: float = 0.10
+    power: float = 0.80
+    require_no_class_regression: bool = True
 
 
 @dataclass
 class ABTestingConfig:
-    """Statistical A/B-testing configuration (cascade in example-report.tex §3).
+    """Statistical A/B configuration: the diagnostic cascade (``metrics.compute_all_metrics``)
+    and the promotion gate (``promotion``).
 
     Attributes:
         enabled:                       Run the A/B-testing pipeline.
         iou_threshold:                 IoU threshold for segmentation agreement.
-        confidence_threshold:          Min confidence to count a prediction.
+        confidence_threshold:          Not implemented: forwarded to run_ab_comparison,
+                                       which ignores it.
         demo_predictions_path:         CSV used when checkpoints are null (avoids
                                        degenerate 100% disagreement on random weights).
-        alpha:                         Significance level (default 0.05).
-        power:                         Target statistical power (default 0.80).
-        mde:                           Minimum detectable effect for sample-size
-                                       calculations (default 0.05).
+        alpha:                         One-sided level of the promotion gate and level of
+                                       the diagnostic tests, in [0.025, 0.5): the exact
+                                       size of the gate's superiority clause exceeds alpha
+                                       at 0.02 and at 0.01 (1.001 and 1.12 alpha).
         multiple_testing_correction:   "bonferroni" | "holm" | "benjamini-hochberg"
-                                       | "none". Applied across the per-class McNemar
-                                       suite (28 defect classes) — closes the gap
-                                       where this YAML key was previously ignored.
-        srm_threshold:                 χ² p-value below which the SRM gate flips and
-                                       results are refused (default 1e-3).
+                                       | "none". Correction across the diagnostic
+                                       per-class McNemar suite (11 classes in P1); the
+                                       gate's per-class clause is an intersection-union
+                                       test and needs none.
+        srm_threshold:                 χ² p-value below which the diagnostic SRM check
+                                       flags a mismatch; computed only for frames with an
+                                       'arm' column, which the paired gate refuses.
+                                       Nothing refuses results on it.
         expected_arm_ratio:            Expected fraction in arm A (default 0.5).
         bootstrap_n:                   Number of bootstrap resamples for percentile/
                                        BCa CIs on Cohen's d and confidence-delta mean.
         cuped_covariate:               Column name to use as the CUPED covariate. None
                                        disables variance reduction. The covariate must
                                        be pre-treatment (e.g., previous-batch confidence).
-        sequential:                    "msprt" | "obrien_fleming" | None. Enables
-                                       always-valid sequential testing for continuous
-                                       monitoring (Johari et al. 2017).
-        bayesian_decision_threshold:   P(B > A) cutoff for ship/no-ship in the Bayesian
-                                       layer (default 0.95).
-        calibrate_before_comparison:   Temperature-scale both models before comparing
-                                       (Minderer 2021).
+        sequential:                    "msprt" | "obrien_fleming" | None. Adds the
+                                       sequential diagnostic block (Johari et al. 2017);
+                                       the gate does not read it.
+        bayesian_decision_threshold:   Threshold of the diagnostic Bayesian blocks'
+                                       ``decision`` field; the gate thresholds no posterior.
+        calibrate_before_comparison:   Not implemented: read by no code.
         promotion:                     Thresholds of the promotion gate (nested section).
     """
     enabled: bool = True
@@ -112,8 +152,6 @@ class ABTestingConfig:
     confidence_threshold: float = 0.5
     demo_predictions_path: Optional[str] = None
     alpha: float = 0.05
-    power: float = 0.80
-    mde: float = 0.05
     multiple_testing_correction: str = "benjamini-hochberg"
     srm_threshold: float = 1e-3
     expected_arm_ratio: float = 0.5
@@ -123,6 +161,10 @@ class ABTestingConfig:
     bayesian_decision_threshold: float = 0.95
     calibrate_before_comparison: bool = False
     promotion: PromotionConfig = field(default_factory=PromotionConfig)
+
+    def gate_kwargs(self) -> Dict[str, Any]:
+        """The keyword arguments of ``decide_promotion``: the gate's only config mapping."""
+        return {"alpha": self.alpha, **dataclasses.asdict(self.promotion)}
 
 
 @dataclass
@@ -243,12 +285,135 @@ class PipelineConfig:
 
 
 # ---------------------------------------------------------------------------
+# Promotion-gate thresholds
+# ---------------------------------------------------------------------------
+
+def _is_number(x: Any) -> bool:
+    if not isinstance(x, (int, float)) or isinstance(x, bool):
+        return False
+    try:
+        return math.isfinite(x)
+    except OverflowError:       # an int beyond the float range
+        return False
+
+
+def _is_class_id(x: Any) -> bool:
+    return (isinstance(x, int) and not isinstance(x, bool)) or isinstance(x, str)
+
+
+def check_gate_thresholds(
+    *,
+    alpha: Any,
+    min_gain: Any,
+    noninferiority_margin: Any,
+    class_margins: Optional[Mapping],
+    expected_classes: Any,
+    class_prior: Any,
+    false_alarm_margin: Any,
+    class_false_alarm_margins: Optional[Mapping],
+    min_detectable_gain: Any,
+    planning_discordance: Any,
+    power: Any,
+    require_no_class_regression: Any,
+) -> None:
+    """Raise ValueError if a promotion-gate threshold is out of range or inconsistent.
+
+    Pure Python, so that the gate and the config loader apply the same rules. None for
+    expected_classes or class_prior is valid: it means "not configured", and the gate
+    then keeps A.
+    """
+    p = "ab_testing.promotion."
+    if not (_is_number(alpha) and 0.025 <= alpha < 0.5):
+        raise ValueError(f"ab_testing.alpha must be a number in [0.025, 0.5), got {alpha!r}: "
+                         f"the exact size of the superiority clause exceeds alpha at 0.02 and "
+                         f"at 0.01")
+    if not (_is_number(min_gain) and 0.0 <= min_gain < 1.0):
+        raise ValueError(f"{p}min_gain must be a number in [0, 1), got {min_gain!r}")
+    if not (_is_number(noninferiority_margin) and 0.0 < noninferiority_margin < 1.0):
+        raise ValueError(f"{p}noninferiority_margin must be a number in (0, 1), "
+                         f"got {noninferiority_margin!r}")
+    if expected_classes is not None:
+        if isinstance(expected_classes, (str, bytes)) or not hasattr(expected_classes, "__iter__"):
+            raise ValueError(f"{p}expected_classes must be a list of class ids, got {expected_classes!r}")
+        ec = list(expected_classes)
+        all_int = all(isinstance(k, int) and not isinstance(k, bool) for k in ec)
+        all_str = all(isinstance(k, str) for k in ec)
+        if not ec or not (all_int or all_str) or len(set(ec)) != len(ec):
+            raise ValueError(f"{p}expected_classes must be a non-empty list of int or of str "
+                             f"class ids, without repeats, got {expected_classes!r}")
+    for key, margins in (("class_margins", class_margins),
+                         ("class_false_alarm_margins", class_false_alarm_margins)):
+        margins = dict(margins or {})
+        for k, m in margins.items():
+            if not _is_class_id(k):
+                raise ValueError(f"{p}{key} keys must be int or str class ids, got {k!r}")
+            if not (_is_number(m) and 0.0 < m < 1.0):
+                raise ValueError(f"{p}{key}[{k!r}] must be a number in (0, 1), got {m!r}")
+        stray = [k for k in margins if expected_classes is not None and k not in set(expected_classes)]
+        if stray:
+            raise ValueError(f"{p}{key} name classes outside expected_classes: {stray}")
+    if class_prior is not None and class_prior != "slice":
+        if not isinstance(class_prior, Mapping):
+            raise ValueError(f"{p}class_prior must be null, 'slice' or a mapping of class "
+                             f"shares, got {class_prior!r}")
+        if (expected_classes is None or not all(_is_class_id(k) for k in class_prior)
+                or set(class_prior) != set(expected_classes)):
+            raise ValueError(f"{p}class_prior keys must be exactly expected_classes (int or "
+                             f"str class ids)")
+        values = list(class_prior.values())
+        if (not all(_is_number(v) and v >= 0 for v in values)
+                or not 0 < sum(float(v) for v in values) < math.inf):
+            raise ValueError(f"{p}class_prior shares must be numbers >= 0 with a positive, "
+                             f"finite sum")
+    if false_alarm_margin is not None and not (_is_number(false_alarm_margin)
+                                               and 0.0 < false_alarm_margin < 1.0):
+        raise ValueError(f"{p}false_alarm_margin must be null or a number in (0, 1), "
+                         f"got {false_alarm_margin!r}")
+    if not (_is_number(min_detectable_gain) and min_gain < min_detectable_gain < 1.0):
+        raise ValueError(f"{p}min_detectable_gain must be a number in (min_gain, 1), "
+                         f"got {min_detectable_gain!r}")
+    if not (_is_number(planning_discordance)
+            and min_detectable_gain <= planning_discordance <= 1.0):
+        raise ValueError(f"{p}planning_discordance must be a number in "
+                         f"[min_detectable_gain, 1], got {planning_discordance!r}")
+    if not (_is_number(power) and 0.5 <= power < 1.0):
+        raise ValueError(f"{p}power must be a number in [0.5, 1), got {power!r}")
+    if not isinstance(require_no_class_regression, bool):
+        raise ValueError(f"{p}require_no_class_regression must be true or false, "
+                         f"got {require_no_class_regression!r}")
+
+
+# ---------------------------------------------------------------------------
 # Loader
 # ---------------------------------------------------------------------------
 
 # YAML keys that are intentionally consumed outside the dataclass schema (e.g.,
 # experiment-only sections that are not part of the typed pipeline config).
 _KNOWN_TOPLEVEL_EXTRA_KEYS = {"flatness_clustering"}
+
+# Keys of the first promotion gate, under ab_testing, with what replaces each one.
+_RETIRED_KEYS = {
+    ("power",): "moved to ab_testing.promotion.power",
+    ("mde",): "moved to ab_testing.promotion.min_detectable_gain (accuracy units)",
+    ("promotion", "min_cohens_d"): "removed: model confidence is no longer a criterion",
+    ("promotion", "bayesian_threshold"): "removed: the gate reports the posterior and "
+                                         "thresholds none",
+    ("promotion", "no_class_regression"): "renamed ab_testing.promotion."
+                                          "require_no_class_regression",
+}
+
+
+def _check_retired_keys(raw: dict) -> None:
+    """Fail once, naming every retired key of the YAML and its replacement."""
+    found = []
+    for path, replacement in _RETIRED_KEYS.items():
+        node = raw.get("ab_testing")
+        for key in path[:-1]:
+            node = node.get(key) if isinstance(node, dict) else None
+        if isinstance(node, dict) and path[-1] in node:
+            found.append(f"ab_testing.{'.'.join(path)}: {replacement}")
+    if found:
+        raise ValueError("Retired YAML key(s): " + "; ".join(found))
 
 
 def _dict_to_dataclass(cls, d: dict, *, _path: str = ""):
@@ -276,10 +441,7 @@ def _validate(cfg: PipelineConfig) -> None:
     (no Pydantic).
     """
     ab = cfg.ab_testing
-    if not (0.0 < ab.alpha < 1.0):
-        raise ValueError(f"ab_testing.alpha must be in (0,1), got {ab.alpha!r}")
-    if not (0.0 < ab.power < 1.0):
-        raise ValueError(f"ab_testing.power must be in (0,1), got {ab.power!r}")
+    check_gate_thresholds(**ab.gate_kwargs())   # alpha and every promotion threshold
     if not (0.0 < ab.expected_arm_ratio < 1.0):
         raise ValueError(
             f"ab_testing.expected_arm_ratio must be in (0,1), got {ab.expected_arm_ratio!r}"
@@ -303,16 +465,6 @@ def _validate(cfg: PipelineConfig) -> None:
         raise ValueError(
             "ab_testing.bayesian_decision_threshold must be in (0,1), got "
             f"{ab.bayesian_decision_threshold!r}"
-        )
-    pr = ab.promotion
-    if pr.min_cohens_d < 0:
-        raise ValueError(
-            f"ab_testing.promotion.min_cohens_d must be >= 0, got {pr.min_cohens_d!r}"
-        )
-    if not (0.0 < pr.bayesian_threshold < 1.0):
-        raise ValueError(
-            "ab_testing.promotion.bayesian_threshold must be in (0,1), got "
-            f"{pr.bayesian_threshold!r}"
         )
     if cfg.anomaly.detector not in {"patchcore", "padim"}:
         raise ValueError(
@@ -352,6 +504,7 @@ def load_config(path: str) -> PipelineConfig:
     with open(path, "r") as f:
         raw = yaml.safe_load(f) or {}
 
+    _check_retired_keys(raw)
     known_top = {f.name for f in PipelineConfig.__dataclass_fields__.values()} \
                 | _KNOWN_TOPLEVEL_EXTRA_KEYS
     unknown_top = set(raw) - known_top

@@ -12,7 +12,9 @@ import pandas as pd
 import pytest
 import seaborn as sns
 
-from steeldefect_active_learning.ab_testing import metrics
+import matplotlib.text
+
+from steeldefect_active_learning.ab_testing import metrics, report
 from steeldefect_active_learning.ab_testing.report import generate_ab_report
 from steeldefect_active_learning.active_learning.calibration import reliability_diagram
 
@@ -45,6 +47,28 @@ def test_ab_report_renders(demo, tmp_path):
     generate_ab_report(demo, output_path=str(out))
     # 11 pages on the demo: classification (no IoU page) and no BALD columns.
     assert len(re.findall(rb"/Type /Page\b", out.read_bytes())) == 11
+
+
+def test_cover_has_no_agreement_verdict(demo, tmp_path, monkeypatch):
+    # B repeats A except on every 30th image A gets right, where B is wrong: strictly
+    # worse, with 97.3 % agreement. The old cover printed "GO" from agreement alone.
+    worse = demo.assign(pred_b=demo["pred_a"])
+    right = np.flatnonzero((demo["pred_a"] == demo["label"]).to_numpy())[::30]
+    worse.loc[worse.index[right], "pred_b"] = (worse["label"].iloc[right] + 1) % 11
+    worse["agrees"] = (worse["pred_a"] == worse["pred_b"]).astype(int)   # the report reads it
+    pages = []
+
+    class RecordingPdf(report.PdfPages):
+        def savefig(self, figure=None, **kwargs):
+            pages.append([t.get_text() for t in figure.findobj(matplotlib.text.Text)])
+            super().savefig(figure, **kwargs)
+
+    monkeypatch.setattr(report, "PdfPages", RecordingPdf)
+    generate_ab_report(worse, output_path=str(tmp_path / "ab_report.pdf"))
+    assert len(pages) == 11
+    cover = pages[0]
+    assert "Promotion verdict" in cover
+    assert not [t for t in cover if t.startswith(("GO", "LIKELY GO", "STOP", "REVIEW"))]
 
 
 @pytest.mark.parametrize("n_classes", [2, 5])

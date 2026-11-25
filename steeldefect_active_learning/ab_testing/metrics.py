@@ -1,13 +1,13 @@
 """
-A/B testing metrics, statistical significance, and visualisation.
+A/B testing metrics, statistical tests and visualisation.
 
-Implements the 5-step decision cascade described in example-report.tex §3:
-    1. Shapiro-Wilk normality check on paired confidence distributions
-    2. Welch's t-test (parametric) or Mann-Whitney U (non-parametric fallback)
-    3. McNemar's test on paired classifications (Yates / exact binomial)
-    4. Cohen's d with Hedges' small-sample correction J(ν) = 1 − 3/(4ν−1)
-    5. Family-wise / FDR correction across the 28 defect classes
-       (Bonferroni | Holm | Benjamini-Hochberg)
+``compute_all_metrics`` first builds the validated paired counts
+(``paired.paired_counts``), the only input of the promotion gate
+(``promotion.decide_promotion``). Every other block is a diagnostic that the gate does
+not read: Shapiro-Wilk then Welch t or Mann-Whitney U on the confidences, the two-sided
+McNemar test overall and per class with a Bonferroni, Holm or Benjamini-Hochberg
+correction across the 11 P1 classes, Cohen's d with Hedges' correction, SRM (frames with
+an 'arm' column only), power, bootstrap, Bayesian, sequential and CUPED blocks.
 
 Classic metrics:
     disagreement_rate         — % of images where Model A and Model B disagree
@@ -15,29 +15,30 @@ Classic metrics:
     per_class_agreement       — agreement rate broken down by predicted class
 
 Advanced metrics:
-    confidence_by_band        — disagreement rate + entropy per confidence band
     entropy_comparison        — mean/std of prediction entropy per model
     margin_comparison         — mean margin score (top-1 minus top-2 softmax prob)
+    disagreement_by_entropy_quartile — disagreement rate per entropy quartile
 
-Statistical testing (Quin & Weyns 2023 — AutoPABS):
-    statistical_significance_test — Welch's t-test + Cohen's d (+ Hedges) effect size
-    mcnemar_test                  — paired-classifier McNemar (Yates / exact)
+Statistical testing (diagnostics):
+    statistical_significance_test — Welch's t-test or Mann-Whitney U on the confidences,
+                                    with Cohen's d (+ Hedges)
+    mcnemar_test                  — two-sided paired-classifier McNemar (Yates / exact)
     per_class_mcnemar             — per-class McNemar suite with multiple-testing correction
-    srm_check                     — sample-ratio-mismatch χ² gate (industry standard)
+    srm_check                     — sample-ratio-mismatch χ² check (traffic splits only)
     correct_pvalues               — Bonferroni / Holm / Benjamini-Hochberg
     required_sample_size          — n needed for target power/effect
-    power_analysis                — achieved power given current sample
+    power_analysis                — power at the observed effect
 
 Summary:
     compute_all_metrics       — single call returning all metrics as one dict
 
 Visualisation:
-    plot_comparison           — 4 standard diagnostic PNGs
-    plot_advanced_comparison  — 4 additional advanced PNGs
-        calibration_curve     — reliability diagram (A vs B)
-        entropy_distribution  — histogram of prediction entropy per model
-        confidence_bands      — disagreement rate per confidence band
-        margin_vs_disagreement— margin score vs disagreement scatter
+    plot_comparison             — 3 standard diagnostic PNGs: disagreement_rate,
+                                  confidence_delta_dist, per_class_agreement
+    plot_advanced_comparison    — 4 more: calibration_curve, entropy_distribution,
+                                  confidence_bands, per_class_accuracy_delta
+    plot_advanced_comparison_v2 — 4 more: kde_heatmap, violin_per_class, mcnemar_test,
+                                  disagreement_decomposition
 
 References:
     Quin & Weyns (2023) "Automating Pipelines of A/B Tests with Population
@@ -63,6 +64,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+
+from .paired import class_cells, mcnemar_two_sided, paired_counts, resolve_correctness
 
 logger = logging.getLogger(__name__)
 
@@ -441,21 +444,20 @@ def srm_check(
         threshold:       p-value cutoff below which SRM is flagged.
 
     Returns:
-        Dict with: n_a, n_b, expected_ratio, observed_ratio_a, chi2, p_value,
-        srm_detected (True ⇒ refuse to publish results).
+        Dict with: applicable, n_a, n_b, expected_ratio, observed_ratio_a, chi2,
+        p_value, and srm_detected (True when the observed split departs from
+        expected_ratio; a diagnostic, nothing refuses results on it). Without any
+        row the check is not applicable: srm_detected is None and the numbers NaN.
     """
     from scipy import stats
     n = n_a + n_b
     if n == 0:
-        return {
-            "n_a": 0, "n_b": 0, "expected_ratio": expected_ratio,
-            "observed_ratio_a": float("nan"), "chi2": float("nan"),
-            "p_value": 1.0, "srm_detected": False,
-        }
+        return _srm_not_applicable("no rows", expected_ratio)
     observed = np.array([n_a, n_b], dtype=float)
     expected = np.array([n * expected_ratio, n * (1 - expected_ratio)], dtype=float)
     chi2, p_value = stats.chisquare(observed, f_exp=expected)
     return {
+        "applicable":       True,
         "n_a":              int(n_a),
         "n_b":              int(n_b),
         "expected_ratio":   float(expected_ratio),
@@ -464,6 +466,27 @@ def srm_check(
         "p_value":          float(p_value),
         "srm_detected":     bool(p_value < threshold),
     }
+
+
+def _srm_not_applicable(reason: str, expected_ratio: float) -> Dict:
+    nan = float("nan")
+    return {"applicable": False, "reason": reason, "srm_detected": None, "n_a": nan,
+            "n_b": nan, "expected_ratio": float(expected_ratio), "observed_ratio_a": nan,
+            "chi2": nan, "p_value": nan}
+
+
+def _srm_block(df: pd.DataFrame, expected_ratio: float, threshold: float) -> Dict:
+    """SRM from an 'arm' column; not applicable to a paired evaluation, which has none."""
+    if "arm" not in df.columns:
+        return _srm_not_applicable("paired evaluation: no 'arm' column", expected_ratio)
+    arms = df["arm"]
+    if arms.isna().any() or not set(arms.unique()) <= {"a", "b"}:
+        found = sorted(map(str, arms.dropna().unique()))[:5]
+        return _srm_not_applicable(f"'arm' values must be exactly 'a' or 'b', none missing; "
+                                   f"found {found} and {int(arms.isna().sum())} missing",
+                                   expected_ratio)
+    n_a = int(arms.eq("a").sum())
+    return srm_check(n_a, len(df) - n_a, expected_ratio=expected_ratio, threshold=threshold)
 
 
 # ---------------------------------------------------------------------------
@@ -484,136 +507,83 @@ def hedges_correction(d: float, n_a: int, n_b: int) -> float:
 
 
 # ---------------------------------------------------------------------------
-# McNemar's test for paired classifiers (cascade step 3)
+# McNemar's test for paired classifiers
 # ---------------------------------------------------------------------------
 
 def mcnemar_test(df: pd.DataFrame, exact_threshold: int = 25) -> Dict:
-    """McNemar's test on paired predictions of two classifiers.
+    """Two-sided McNemar test on the paired correctness of two classifiers (a diagnostic).
 
-    Requires either:
-      - 'correct_a' and 'correct_b' columns (per-row 0/1), preferred; OR
-      - 'pred_a', 'pred_b', and 'label' columns (we derive correct_x = (pred_x == label)).
-
-    Yates' continuity correction is applied when discordant pairs (b + c) ≥ exact_threshold;
-    otherwise an exact binomial test on the discordant pairs is used (statsmodels-style).
+    Correctness comes from validated ('pred_a', 'pred_b', 'label') or ('correct_a',
+    'correct_b') columns, read by position (``paired.resolve_correctness``): a missing or
+    mistyped value makes the test not applicable instead of counting as an error.
+    Yates' continuity correction from ``exact_threshold`` discordant pairs (b + c), an
+    exact binomial test below. The promotion gate uses its own one-sided test.
 
     Returns:
-        Dict with: b (a_correct ∧ b_wrong), c (a_wrong ∧ b_correct),
-        statistic, p_value, test_used ('mcnemar_yates' | 'mcnemar_exact'),
-        n_discordant, n_concordant, applicable.
+        Dict with: applicable, b (A correct, B wrong), c (A wrong, B correct), statistic,
+        p_value, test_used ('mcnemar_yates' | 'mcnemar_exact' | 'mcnemar_degenerate'),
+        n_discordant, n_concordant, alternative; or applicable False and the reason.
     """
-    correct_a, correct_b = _resolve_correctness(df)
+    correct_a, correct_b, errors, _ = resolve_correctness(df)
     if correct_a is None:
-        return {"applicable": False, "reason": "no ground truth or correctness columns"}
-
-    # b: A correct, B wrong; c: A wrong, B correct  (discordant pairs)
+        return {"applicable": False, "reason": "; ".join(errors)}
     b = int(np.sum(correct_a & ~correct_b))
     c = int(np.sum(~correct_a & correct_b))
-    n_discordant = b + c
-    n_concordant = int(len(correct_a)) - n_discordant
+    out = mcnemar_two_sided(b, c, exact_threshold)
+    return {"applicable": True, **out, "n_concordant": int(len(correct_a)) - b - c}
 
-    if n_discordant == 0:
-        return {
-            "applicable": True, "b": b, "c": c, "statistic": 0.0, "p_value": 1.0,
-            "test_used": "mcnemar_degenerate",
-            "n_discordant": 0, "n_concordant": n_concordant,
-        }
 
-    if n_discordant >= exact_threshold:
-        from scipy.stats import chi2 as _chi2
-        # Yates-corrected χ² with df=1
-        statistic = (abs(b - c) - 1.0) ** 2 / float(n_discordant)
-        p_value = float(1.0 - _chi2.cdf(statistic, df=1))
-        test_used = "mcnemar_yates"
-    else:
-        # Exact binomial on discordant pairs (k=min(b,c), n=b+c, p=0.5, two-sided)
-        from scipy.stats import binom
-        k = min(b, c)
-        # two-sided exact: 2 * P(X ≤ k) clipped at 1
-        p_value = float(min(1.0, 2.0 * binom.cdf(k, n_discordant, 0.5)))
-        statistic = float(k)
-        test_used = "mcnemar_exact"
+_PER_CLASS_MCNEMAR_COLUMNS = [
+    "class_id", "n", "b", "c", "statistic", "p_value", "p_corrected", "reject",
+    "test_used", "alternative",
+]
 
-    return {
-        "applicable":   True,
-        "b":            b,
-        "c":            c,
-        "statistic":    float(statistic),
-        "p_value":      float(p_value),
-        "test_used":    test_used,
-        "n_discordant": n_discordant,
-        "n_concordant": n_concordant,
-    }
+
+def _per_class_mcnemar_table(rows: Sequence[Dict], correction: Optional[str],
+                             alpha: float) -> pd.DataFrame:
+    """Two-sided McNemar per class from per-class cells, with a correction across classes."""
+    records = []
+    for row in rows:
+        res = mcnemar_two_sided(row["only_a_correct"], row["only_b_correct"])
+        records.append({
+            "class_id": row["class"], "n": row["n"], "b": res["b"], "c": res["c"],
+            "statistic": res["statistic"], "p_value": res["p_value"],
+            "test_used": res["test_used"], "alternative": res["alternative"],
+        })
+    out = pd.DataFrame(records)
+    corr = correct_pvalues(out["p_value"].values, method=correction, alpha=alpha)
+    out["p_corrected"] = corr["p_corrected"]
+    out["reject"] = corr["reject"]
+    out = out[_PER_CLASS_MCNEMAR_COLUMNS]
+    out.attrs["correction_method"] = corr["method"]
+    return out
 
 
 def per_class_mcnemar(
     df: pd.DataFrame,
     correction: Optional[str] = "benjamini-hochberg",
     alpha: float = 0.05,
+    *,
+    class_col: str = "label",
 ) -> pd.DataFrame:
-    """Run McNemar per defect class and apply multiple-testing correction.
+    """Two-sided McNemar per true class, with a multiple-testing correction (a diagnostic).
+
+    Rows are grouped by position on validated labels and correctness
+    (``paired.class_cells``), so a sorted, shuffled, filtered or concatenated frame gives
+    the same table. Every class present gets a row, including classes where A and B never
+    disagree (p = 1).
 
     Returns a DataFrame with one row per class:
-        class_id, n, b, c, statistic, p_value, p_corrected, reject, test_used.
-
-    Empty if ground truth ('label' column or correct_a/correct_b) is unavailable —
-    we cannot do per-class McNemar without knowing which model is correct.
+        class_id, n, b, c, statistic, p_value, p_corrected, reject, test_used, alternative.
+    Empty, with the reason in ``attrs['reason']``, when the frame has no rows or the
+    labels or the correctness are missing or invalid.
     """
-    correct_a, correct_b = _resolve_correctness(df)
-    if correct_a is None or "label" not in df.columns:
-        return pd.DataFrame(columns=[
-            "class_id", "n", "b", "c", "statistic", "p_value",
-            "p_corrected", "reject", "test_used",
-        ])
-
-    rows: List[Dict] = []
-    for cls, sub in df.groupby("label"):
-        ca = correct_a[sub.index]
-        cb = correct_b[sub.index]
-        if len(ca) == 0:
-            continue
-        sub_df = pd.DataFrame({"correct_a": ca.astype(int), "correct_b": cb.astype(int)})
-        res = mcnemar_test(sub_df)
-        if not res.get("applicable", False):
-            continue
-        rows.append({
-            "class_id":  int(cls) if not isinstance(cls, str) else cls,
-            "n":         int(len(sub)),
-            "b":         int(res["b"]),
-            "c":         int(res["c"]),
-            "statistic": float(res["statistic"]),
-            "p_value":   float(res["p_value"]),
-            "test_used": res["test_used"],
-        })
-
-    if not rows:
-        return pd.DataFrame(columns=[
-            "class_id", "n", "b", "c", "statistic", "p_value",
-            "p_corrected", "reject", "test_used",
-        ])
-
-    out = pd.DataFrame(rows).sort_values("class_id").reset_index(drop=True)
-    corr = correct_pvalues(out["p_value"].values, method=correction, alpha=alpha)
-    out["p_corrected"] = corr["p_corrected"]
-    out["reject"]      = corr["reject"]
-    out.attrs["correction_method"] = corr["method"]
-    return out
-
-
-def _resolve_correctness(df: pd.DataFrame):
-    """Resolve per-row correctness for both arms.
-
-    Prefers explicit 'correct_a'/'correct_b' columns; otherwise derives them from
-    ('pred_a','pred_b','label'). Returns (correct_a, correct_b) as boolean arrays
-    indexed identically to df, or (None, None) if not derivable.
-    """
-    if "correct_a" in df.columns and "correct_b" in df.columns:
-        return df["correct_a"].astype(bool).values, df["correct_b"].astype(bool).values
-    if "pred_a" in df.columns and "pred_b" in df.columns and "label" in df.columns:
-        ca = (df["pred_a"].values == df["label"].values).astype(bool)
-        cb = (df["pred_b"].values == df["label"].values).astype(bool)
-        return ca, cb
-    return None, None
+    rows, errors = class_cells(df, class_col=class_col)
+    if errors or not rows:
+        out = pd.DataFrame(columns=_PER_CLASS_MCNEMAR_COLUMNS)
+        out.attrs["reason"] = "; ".join(errors) if errors else "no rows"
+        return out
+    return _per_class_mcnemar_table(rows, correction, alpha)
 
 
 # ---------------------------------------------------------------------------
@@ -765,8 +735,8 @@ def power_analysis(df: pd.DataFrame, alpha: float = 0.05) -> Dict:
         alpha: Significance level.
 
     Returns:
-        Dict with: achieved_power, observed_effect, n, required_n_for_80pct_power,
-                   sigma, adequately_powered.
+        Dict with: achieved_power (NaN when it cannot be computed), observed_effect, n,
+                   required_n_for_80pct, sigma, adequately_powered.
     """
     from scipy.stats import norm
 
@@ -781,7 +751,11 @@ def power_analysis(df: pd.DataFrame, alpha: float = 0.05) -> Dict:
     se  = sigma * math.sqrt(2.0 / n) if n > 0 else 1.0
     ncp = observed_effect / (se + 1e-12)
     achieved_power = float(norm.cdf(ncp - z_alpha) + norm.cdf(-ncp - z_alpha))
-    achieved_power = max(0.0, min(1.0, achieved_power))
+    # min(1.0, nan) is 1.0: clamp only a finite value, and never call NaN adequate.
+    if math.isfinite(achieved_power):
+        achieved_power = max(0.0, min(1.0, achieved_power))
+    else:
+        achieved_power = float("nan")
 
     req_n = required_sample_size(
         effect_size=observed_effect, sigma=sigma, alpha=alpha, power=0.80
@@ -813,139 +787,166 @@ def compute_all_metrics(
     bayesian: bool = False,
     bayesian_decision_threshold: float = 0.95,
     sequential: Optional[str] = None,
+    *,
+    class_col: str = "label",
+    id_col: Optional[str] = None,
+    cluster_col: Optional[str] = None,
 ) -> Dict:
-    """Compute the full A/B cascade in a single call.
+    """Compute the A/B cascade in a single call.
+
+    The first block, ``paired_counts``, holds the validated paired counts that the
+    promotion gate reads. Every other block is a diagnostic, computed on its own: a
+    block that fails is left out and its error recorded in ``diagnostic_errors``,
+    instead of aborting the cascade. ``agrees`` and ``confidence_delta`` are recomputed
+    from the columns they summarise; a supplied column that differs is reported there.
 
     Args:
-        df:              A/B comparison DataFrame.
+        df:              A/B comparison DataFrame, one row per image.
         task:            "classification" or "segmentation".
-        alpha:           Significance level (default 0.05).
+        alpha:           Level of the diagnostic tests (default 0.05).
         correction:      Multiple-testing correction across the per-class McNemar
                          suite. One of {"bonferroni", "holm", "benjamini-hochberg",
                          "none"}. Reads from cfg.ab_testing.multiple_testing_correction.
-        srm_threshold:   p-value below which SRM gate flips. Default 1e-3 (industry
-                         standard).
-        expected_ratio:  Expected fraction of arm A in an SRM check. Default 0.5.
+        srm_threshold:   p-value below which the SRM check flags a mismatch.
+        expected_ratio:  Expected fraction of arm A in the SRM check. Default 0.5.
+        class_col, id_col, cluster_col: columns of the paired-counts contract
+                         (``paired.paired_counts``).
 
     Returns:
-        Nested dict containing all five cascade steps:
-            "srm":          sample-ratio-mismatch χ² gate
-            "disagreement": disagreement rate + n
-            "delta":        confidence-delta summary
-            "statistical":  Welch / Mann-Whitney + Cohen's d (+ Hedges)
-            "mcnemar":      paired-classifier McNemar (if labels available)
-            "per_class_mcnemar": per-class McNemar w/ multiple-testing correction
-            "power":        achieved power + required n at 80%
-            "entropy":      entropy comparison (if entropy columns present)
-            "margin":       margin comparison (if margin columns present)
-            "segmentation": IoU / Dice metrics (if task='segmentation')
-            "per_class":    per-class agreement breakdown
+        Nested dict:
+            "paired_counts":     validated 2x2 counts, overall and per class (gate input)
+            "diagnostic_errors": [{"block", "error"}] for the blocks that failed
+            "srm":               sample-ratio-mismatch χ² check, applicable only with an
+                                 'arm' column (a traffic split, which the gate refuses)
+            "disagreement":      disagreement rate + n
+            "delta":             confidence-delta summary
+            "statistical":       Welch / Mann-Whitney + Cohen's d (+ Hedges)
+            "power":             achieved power + required n at 80%
+            "mcnemar":           two-sided McNemar (when paired_counts is valid)
+            "per_class_mcnemar": per-class McNemar with the correction (idem)
+            "cuped", "bootstrap", "bayesian", "sequential": when requested
+            "entropy", "margin": when their columns are present
+            "segmentation":      IoU / Dice metrics (if task='segmentation')
+            "per_class":         per-class agreement breakdown
     """
-    out: Dict = {}
+    df = df.reset_index(drop=True).copy()
+    out: Dict = {
+        "paired_counts": paired_counts(df, class_col=class_col, id_col=id_col,
+                                       cluster_col=cluster_col),
+        "diagnostic_errors": [],
+    }
+    errors = out["diagnostic_errors"]
+    try:
+        _derive_summary_columns(df, errors)
+    except Exception as exc:  # noqa: BLE001 — the gate's block is already built
+        logger.warning("A/B summary columns not derived: %s", exc)
+        errors.append({"block": "input", "error": f"{type(exc).__name__}: {exc}"})
 
-    n_total = len(df)
-    n_arm_a = int(df["arm"].eq("a").sum()) if "arm" in df.columns else n_total // 2
-    n_arm_b = n_total - n_arm_a if "arm" in df.columns else n_total - n_arm_a
-    out["srm"] = srm_check(n_arm_a, n_arm_b, expected_ratio=expected_ratio,
-                           threshold=srm_threshold)
+    def run(name: str, compute) -> None:
+        try:
+            value = compute()
+        except Exception as exc:  # noqa: BLE001 — a failed diagnostic is recorded, never fatal
+            logger.warning("A/B diagnostic '%s' skipped: %s", name, exc)
+            errors.append({"block": name, "error": f"{type(exc).__name__}: {exc}"})
+            return
+        out[name] = value
 
-    out["disagreement"] = {"rate": disagreement_rate(df), "n": n_total}
-    out["delta"]        = confidence_delta_summary(df)
-    out["statistical"]  = statistical_significance_test(df, alpha=alpha)
-    out["power"]        = power_analysis(df, alpha=alpha)
+    run("srm", lambda: _srm_block(df, expected_ratio, srm_threshold))
+    run("disagreement", lambda: {"rate": disagreement_rate(df), "n": len(df)})
+    run("delta", lambda: confidence_delta_summary(df))
+    run("statistical", lambda: statistical_significance_test(df, alpha=alpha))
+    run("power", lambda: power_analysis(df, alpha=alpha))
 
     # CUPED variance reduction on confidence_delta when a pre-treatment covariate
     # is supplied. Reports both vanilla and adjusted CIs so the gain is visible.
+    def cuped() -> Dict:
+        df_cuped = apply_cuped(df, "confidence_delta", cuped_covariate)
+        v_ratio = df_cuped.attrs.get("confidence_delta_cuped_variance_ratio", 1.0)
+        cuped_vals = df_cuped["confidence_delta_cuped"].values
+        return {
+            "covariate":       cuped_covariate,
+            "theta":           float(df_cuped.attrs.get("confidence_delta_cuped_theta", 0.0)),
+            "rho":             float(df_cuped.attrs.get("confidence_delta_cuped_rho", 0.0)),
+            "variance_ratio":  float(v_ratio),
+            "mean":            float(np.mean(cuped_vals)),
+            "std":             float(np.std(cuped_vals, ddof=1)),
+            "var_reduction":   float(1.0 - v_ratio),
+        }
+
     if cuped_covariate and cuped_covariate in df.columns and "confidence_delta" in df.columns:
-        try:
-            df_cuped = apply_cuped(df, "confidence_delta", cuped_covariate)
-            theta = df_cuped.attrs.get("confidence_delta_cuped_theta", 0.0)
-            rho   = df_cuped.attrs.get("confidence_delta_cuped_rho", 0.0)
-            v_ratio = df_cuped.attrs.get("confidence_delta_cuped_variance_ratio", 1.0)
-            cuped_vals = df_cuped["confidence_delta_cuped"].values
-            out["cuped"] = {
-                "covariate":       cuped_covariate,
-                "theta":           float(theta),
-                "rho":             float(rho),
-                "variance_ratio":  float(v_ratio),
-                "mean":            float(np.mean(cuped_vals)),
-                "std":             float(np.std(cuped_vals, ddof=1)),
-                "var_reduction":   float(1.0 - v_ratio),
-            }
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("CUPED skipped: %s", exc)
+        run("cuped", cuped)
 
     # Bootstrap CI for Cohen's d on the confidence distributions, if requested.
-    if bootstrap_n > 0 and "confidence_a" in df.columns and "confidence_b" in df.columns:
+    def bootstrap() -> Dict:
         a = df["confidence_a"].dropna().values.astype(float)
         b = df["confidence_b"].dropna().values.astype(float)
-        out["bootstrap"] = {
+        return {
             "cohens_d":  bootstrap_ci(a, b, "cohens_d",  n_resamples=bootstrap_n, alpha=alpha),
             "mean_diff": bootstrap_ci(a, b, "mean_diff", n_resamples=bootstrap_n, alpha=alpha),
         }
 
-    # Bayesian decision (Beta-Binomial on agreement/accuracy + Normal on confidence).
+    if bootstrap_n > 0 and "confidence_a" in df.columns and "confidence_b" in df.columns:
+        run("bootstrap", bootstrap)
+
+    # Bayesian blocks: Beta-Binomial on agreement, paired Dirichlet on accuracy, Normal on
+    # confidence.
+    def bayesian_block() -> Dict:
+        from .bayesian import bayesian_summary
+        return bayesian_summary(df, decision_threshold=bayesian_decision_threshold,
+                                cred_level=1.0 - alpha, counts=out["paired_counts"])
+
     if bayesian:
-        try:
-            from .bayesian import bayesian_summary
-            out["bayesian"] = bayesian_summary(
-                df,
-                decision_threshold=bayesian_decision_threshold,
-                cred_level=1.0 - alpha,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Bayesian summary skipped: %s", exc)
+        run("bayesian", bayesian_block)
 
     # Sequential / always-valid testing (mSPRT or O'Brien-Fleming).
-    if sequential and "confidence_a" in df.columns and "confidence_b" in df.columns:
-        try:
-            from .sequential import (
-                MSPRTState,
-                confidence_sequence,
-                obrien_fleming_decide,
-            )
+    def sequential_block() -> Dict:
+        from .sequential import MSPRTState, confidence_sequence, obrien_fleming_decide
+        if sequential == "msprt":
             a = df["confidence_a"].dropna().values.astype(float)
             b = df["confidence_b"].dropna().values.astype(float)
-            if sequential == "msprt":
-                state = MSPRTState()
-                state.update_batch(a, b)
-                cs_lo, cs_hi = confidence_sequence(state, alpha=alpha)
-                out["sequential"] = {
-                    "method":     "msprt",
-                    "p_av":       state.always_valid_p(),
-                    "delta":      state.mean_diff(),
-                    "cs_low":     cs_lo,
-                    "cs_high":    cs_hi,
-                    "decision":   "stop_reject_h0" if state.always_valid_p() < alpha else "continue",
-                }
-            elif sequential == "obrien_fleming":
-                # Treat the current run as the final (and only) look — a sane
-                # default; users with multi-look plans can call the helper directly.
-                z = out["statistical"]["t_stat"]
-                out["sequential"] = obrien_fleming_decide(
-                    z_observed=z, look=1, n_looks=1, alpha=alpha,
-                )
-                out["sequential"]["method"] = "obrien_fleming"
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Sequential summary skipped: %s", exc)
-
-    mc = mcnemar_test(df)
-    if mc.get("applicable", False):
-        out["mcnemar"] = mc
-        per_cls_mc = per_class_mcnemar(df, correction=correction, alpha=alpha)
-        if not per_cls_mc.empty:
-            out["per_class_mcnemar"] = {
-                "method": per_cls_mc.attrs.get("correction_method", correction),
-                "alpha":  alpha,
-                "rows":   per_cls_mc.to_dict(orient="records"),
+            state = MSPRTState()
+            state.update_batch(a, b)
+            cs_lo, cs_hi = confidence_sequence(state, alpha=alpha)
+            return {
+                "method":     "msprt",
+                "p_av":       state.always_valid_p(),
+                "delta":      state.mean_diff(),
+                "cs_low":     cs_lo,
+                "cs_high":    cs_hi,
+                "decision":   "stop_reject_h0" if state.always_valid_p() < alpha else "continue",
             }
+        # O'Brien-Fleming: treat the current run as the final (and only) look — a sane
+        # default; users with multi-look plans can call the helper directly.
+        block = obrien_fleming_decide(z_observed=out["statistical"]["t_stat"],
+                                      look=1, n_looks=1, alpha=alpha)
+        block["method"] = "obrien_fleming"
+        return block
+
+    if sequential in ("msprt", "obrien_fleming") \
+            and "confidence_a" in df.columns and "confidence_b" in df.columns:
+        run("sequential", sequential_block)
+
+    # McNemar, overall and per class, from the validated counts: one source of truth
+    # with the gate, and nothing when the slice breaks the contract.
+    pc = out["paired_counts"]
+
+    def per_class_mcnemar_block() -> Dict:
+        table = _per_class_mcnemar_table(pc["per_class"], correction, alpha)
+        return {"method": table.attrs["correction_method"], "alpha": alpha,
+                "rows": table.to_dict(orient="records")}
+
+    if pc["valid"]:
+        n10, n01 = pc["only_a_correct"], pc["only_b_correct"]
+        run("mcnemar", lambda: {"applicable": True, **mcnemar_two_sided(n10, n01),
+                                "n_concordant": pc["n"] - n10 - n01})
+        run("per_class_mcnemar", per_class_mcnemar_block)
 
     if "entropy_a" in df.columns:
-        out["entropy"] = entropy_comparison(df)
+        run("entropy", lambda: entropy_comparison(df))
     if "margin_a" in df.columns:
-        out["margin"]  = margin_comparison(df)
+        run("margin", lambda: margin_comparison(df))
 
-    if task == "segmentation":
+    def segmentation() -> Dict:
         seg: Dict = {}
         if "iou" in df.columns:
             seg["mean_iou"]    = float(df["iou"].mean())
@@ -955,12 +956,44 @@ def compute_all_metrics(
             seg["mean_dice"]   = float(df["dice"].mean())
         if "boundary_iou" in df.columns:
             seg["mean_boundary_iou"] = float(df["boundary_iou"].mean())
-        out["segmentation"] = seg
+        return seg
+
+    if task == "segmentation":
+        run("segmentation", segmentation)
 
     if "pred_a" in df.columns:
-        out["per_class"] = per_class_agreement(df).to_dict(orient="records")
+        run("per_class", lambda: per_class_agreement(df).to_dict(orient="records"))
 
     return out
+
+
+def _derive_summary_columns(df: pd.DataFrame, errors: List[Dict]) -> None:
+    """Recompute ``agrees`` and ``confidence_delta`` in place from the columns they summarise.
+
+    A supplied column that differs is replaced and reported in ``errors``. The tolerance
+    on ``confidence_delta`` (1e-5) accepts values rounded to 6 decimals, as in the demo CSV.
+    """
+    cols = set(df.columns)
+    if {"pred_a", "pred_b"} <= cols:
+        # As objects: pandas refuses to compare categoricals whose categories differ.
+        derived = (df["pred_a"].astype(object) == df["pred_b"].astype(object)).astype(int)
+        if "agrees" in cols:
+            k = int((pd.to_numeric(df["agrees"], errors="coerce") != derived).sum())
+            if k:
+                errors.append({"block": "input", "error": f"agrees disagrees with pred_a == "
+                                                          f"pred_b on {k} row(s); derived values used"})
+        df["agrees"] = derived
+    if {"confidence_a", "confidence_b"} <= cols:
+        derived = (pd.to_numeric(df["confidence_a"], errors="coerce")
+                   - pd.to_numeric(df["confidence_b"], errors="coerce")).abs()
+        if "confidence_delta" in cols:
+            supplied = pd.to_numeric(df["confidence_delta"], errors="coerce")
+            k = int((~np.isclose(supplied, derived, rtol=0.0, atol=1e-5, equal_nan=True)).sum())
+            if k:
+                errors.append({"block": "input", "error": f"confidence_delta disagrees with "
+                                                          f"|confidence_a - confidence_b| on {k} "
+                                                          f"row(s); derived values used"})
+        df["confidence_delta"] = derived
 
 
 # ---------------------------------------------------------------------------
@@ -984,9 +1017,10 @@ def plot_comparison(
     task: str = "classification",
     prefix: str = "ab",
 ) -> None:
-    """Generate and save the standard 4 A/B diagnostic PNGs.
+    """Generate and save the 3 standard A/B diagnostic PNGs.
 
-    Saved files:
+    The third is per_class_agreement for classification, iou_distribution for
+    segmentation. Saved files:
         {prefix}_disagreement_rate.png
         {prefix}_confidence_delta_dist.png
         {prefix}_per_class_agreement.png   (classification only)
@@ -1621,7 +1655,7 @@ def _plot_mcnemar_test(df, output_dir, prefix, name_a, name_b):
     discordant = n01 + n10
     if discordant >= 25:
         chi2 = (abs(n01 - n10) - 1) ** 2 / discordant
-        p_value = 1.0 - sp_stats.chi2.cdf(chi2, df=1)
+        p_value = float(sp_stats.chi2.sf(chi2, df=1))
         test_type = "χ² (continuity-corrected)"
     elif discordant > 0:
         p_value = float(sp_stats.binomtest(n01, discordant, 0.5).pvalue)
@@ -2014,7 +2048,7 @@ def per_class_significance_test(
             p_raw = 1.0
         elif discordant >= 25:
             chi2 = (abs(n01 - n10) - 1) ** 2 / discordant
-            p_raw = float(1 - sp_stats.chi2.cdf(chi2, df=1))
+            p_raw = float(sp_stats.chi2.sf(chi2, df=1))
         else:
             p_raw = float(sp_stats.binomtest(n01, discordant, 0.5).pvalue)
 

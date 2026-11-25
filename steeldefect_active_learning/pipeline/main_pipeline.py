@@ -822,7 +822,9 @@ def run_pipeline(cfg: PipelineConfig) -> None:
         srm   = all_metrics.get("srm", {})
 
         print()
-        if srm.get("srm_detected"):
+        if not srm.get("applicable", True):
+            _row("SRM check", f"not applicable ({srm.get('reason')})")
+        elif srm.get("srm_detected"):
             _warn(
                 f"SRM DETECTED  observed_ratio_a={srm.get('observed_ratio_a'):.3f} "
                 f"(expected {srm.get('expected_ratio'):.3f})  "
