@@ -58,8 +58,8 @@ ID_CANDIDATES = ("segmentation_id", "image_id", "image_path")
 _INT64_MAX = 2 ** 63 - 1
 # Largest slice a block may describe. On balanced counts, the binomial and beta tails of
 # scipy 1.15, which the gate reports, stay within 1e-7 of their exact values up to 1e10
-# discordant images, and are off by 3e-4 at 2e13 (scipy 1.18: 1e-9); from 2^64 discordant
-# images, the binomial tail raises.
+# discordant images, and are off by up to 4e-4 at 2e13 (scipy 1.18: within 1e-13); from
+# 2^64 discordant images, the binomial tail raises.
 MAX_IMAGES = 10 ** 9
 # One count subtracted from the score numerator of every decision bound. In every
 # configuration checked by exact enumeration, for alpha from 0.025 to 0.45, it keeps the
@@ -127,7 +127,7 @@ def _class_values(s: pd.Series, name: str, errors: List[str]) -> Optional[np.nda
         if not np.all(np.isfinite(values)) or not np.all(values == np.round(values)):
             errors.append(f"{name}: non-integral float values")
             return None
-        if np.any(np.abs(values) >= 2.0 ** 63):     # astype would wrap them silently
+        if np.any(np.abs(values) >= 2.0 ** 63):     # astype would make them all one value
             errors.append(f"{name}: class ids outside the int64 range")
             return None
         return values.astype(np.int64)
@@ -422,7 +422,7 @@ def paired_counts_errors(block: Any) -> List[str]:
     Never raises. Returns an empty list for a valid, internally consistent block:
 
     - the cells are non-negative integers summing to ``n``, with 0 < n <= MAX_IMAGES,
-      ``errors`` is an empty list and ``id_col`` a string or null;
+      ``errors`` is an empty list or null and ``id_col`` a string or null;
     - every ``per_class`` row is a mapping with a new plain int or str class, a name that
       is a string or null, and cells summing to its ``n > 0`` (an absent class has no
       row); the rows' cells sum to the overall ones;
@@ -435,7 +435,8 @@ def paired_counts_errors(block: Any) -> List[str]:
       both models raise together never outnumber the images both get wrong.
 
     Counts cannot show which class a model predicted: moving alarms from one row to
-    another keeps every rule, and describes another, internally consistent frame.
+    another within these caps keeps every rule, and describes another, internally
+    consistent frame.
     Blocks are read back from JSON; other containers, such as the numpy arrays of a
     parquet round trip, are rejected.
     """

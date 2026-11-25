@@ -196,7 +196,8 @@ def test_promotion_ranges(tmp_path, promotion, key):
 
 @pytest.mark.parametrize("alpha", [0.5, 0.02, 0.01])
 def test_alpha_must_lie_in_the_checked_range(tmp_path, alpha):
-    # Below 0.025 the exact size of the superiority clause exceeds alpha (1.12 alpha at 0.01).
+    # The exact size of the superiority clause exceeds alpha at 0.02 and at 0.01 (1.001 and
+    # 1.12 alpha); 0.025 keeps a margin above the first exceedance found.
     with pytest.raises(ValueError, match=r"ab_testing\.alpha must be a number in \[0\.025, 0\.5\)"):
         load_config(str(_write(tmp_path, f"ab_testing:\n  alpha: {alpha}\n")))
 

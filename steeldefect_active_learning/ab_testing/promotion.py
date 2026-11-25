@@ -19,19 +19,21 @@ predicted class) and returns ``promote_B`` only if every criterion holds:
 5. ``no_false_alarm_increase``: no class shows, at level alpha, an increase of B's false
    alarms into it larger than its false-alarm margin.
 
-Every bound is Tango's (1998) score bound with a one-count continuity adjustment
-(``paired.score_lower_bound``). Requiring every clause is an intersection-union test
+Every per-class, slice and false-alarm bound is Tango's (1998) score bound with a one-count
+continuity adjustment (``paired.score_lower_bound``); the bound at the deployment prior
+combines the per-class bounds by MOVER. Requiring every clause is an intersection-union test
 (Berger 1982): no multiplicity correction is needed, and the probability of promoting a B
 for which one of these claims is false is at most the largest clause size. At
 alpha = 0.05 that size stayed at or below 0.05 in every configuration checked with up to
 40 % of the images discordant (exact enumeration for the per-class and slice bounds,
 simulation for the prior-weighted bound), and reached 0.0503 only when every image is
-discordant. alpha must lie in [0.025, 0.5): below 0.025, the slice bound tested above a
-positive ``min_gain`` is too skewed for the adjustment, and its exact size exceeds alpha
-(1.12 alpha at alpha = 0.01, when B never loses and gains exactly min_gain). From 0.025 to
-0.45, the exact sizes checked stayed at or below alpha, again except when every image of
-a class is discordant (up to 1.009 alpha). Missing or invalid evidence fails its
-criterion. Model confidence plays no part.
+discordant. alpha must lie in [0.025, 0.5): at small alpha, the slice bound tested above
+a positive ``min_gain`` is too skewed for the adjustment. When B never loses and gains
+exactly min_gain, its exact size reaches 1.12 alpha at alpha = 0.01 and 1.001 alpha at
+0.02, over every n from 20 to 6,000 (0.993 alpha at 0.0225, and 0.998 alpha with n up to
+30,000). From 0.025 to 0.45, the exact sizes checked stayed at or below alpha, again
+except when every image of a class is discordant (up to 1.009 alpha). Missing or invalid
+evidence fails its criterion. Model confidence plays no part.
 
 The gate assumes what it cannot check: the images are independent (one per coil, or a
 cluster column with one image per cluster), the labels of the images on which A and B

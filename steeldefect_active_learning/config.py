@@ -121,9 +121,9 @@ class ABTestingConfig:
         demo_predictions_path:         CSV used when checkpoints are null (avoids
                                        degenerate 100% disagreement on random weights).
         alpha:                         One-sided level of the promotion gate and level of
-                                       the diagnostic tests, in [0.025, 0.5): below 0.025,
-                                       the exact size of the gate's superiority clause
-                                       exceeds alpha (1.12 alpha at 0.01).
+                                       the diagnostic tests, in [0.025, 0.5): the exact
+                                       size of the gate's superiority clause exceeds alpha
+                                       at 0.02 and at 0.01 (1.001 and 1.12 alpha).
         multiple_testing_correction:   "bonferroni" | "holm" | "benjamini-hochberg"
                                        | "none". Correction across the diagnostic
                                        per-class McNemar suite (11 classes in P1); the
@@ -325,7 +325,8 @@ def check_gate_thresholds(
     p = "ab_testing.promotion."
     if not (_is_number(alpha) and 0.025 <= alpha < 0.5):
         raise ValueError(f"ab_testing.alpha must be a number in [0.025, 0.5), got {alpha!r}: "
-                         f"below 0.025 the exact size of the superiority clause exceeds alpha")
+                         f"the exact size of the superiority clause exceeds alpha at 0.02 and "
+                         f"at 0.01")
     if not (_is_number(min_gain) and 0.0 <= min_gain < 1.0):
         raise ValueError(f"{p}min_gain must be a number in [0, 1), got {min_gain!r}")
     if not (_is_number(noninferiority_margin) and 0.0 < noninferiority_margin < 1.0):
