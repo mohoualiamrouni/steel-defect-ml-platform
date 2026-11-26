@@ -10,6 +10,8 @@ correction across the 11 P1 classes, Cohen's d with Hedges' correction, SRM (fra
 an 'arm' column only), power, bootstrap, Bayesian, sequential and CUPED blocks.
 
 Classic metrics:
+    derive_summary_columns    — agrees and confidence_delta, recomputed from the columns
+                                they summarise (read by the cascade and the PDF report)
     disagreement_rate         — % of images where Model A and Model B disagree
     confidence_delta_summary  — mean / std / p90 of |conf_a - conf_b|
     per_class_agreement       — agreement rate broken down by predicted class
@@ -56,7 +58,7 @@ from __future__ import annotations
 import logging
 import math
 import os
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import matplotlib
 import matplotlib.patches as mpatches
@@ -859,7 +861,8 @@ def compute_all_metrics(
     }
     errors = out["diagnostic_errors"]
     try:
-        _derive_summary_columns(df, errors)
+        df, issues = derive_summary_columns(df)
+        errors.extend({"block": "input", "error": issue} for issue in issues)
     except Exception as exc:  # noqa: BLE001 — the gate's block is already built
         logger.warning("A/B summary columns not derived: %s", exc)
         errors.append({"block": "input", "error": f"{type(exc).__name__}: {exc}"})
@@ -989,33 +992,40 @@ def compute_all_metrics(
     return out
 
 
-def _derive_summary_columns(df: pd.DataFrame, errors: List[Dict]) -> None:
-    """Recompute ``agrees`` and ``confidence_delta`` in place from the columns they summarise.
+def derive_summary_columns(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
+    """A copy of ``df`` whose ``agrees`` and ``confidence_delta`` are recomputed.
 
-    A supplied column that differs is replaced and reported in ``errors``. The tolerance
-    on ``confidence_delta`` (1e-5) accepts values rounded to 6 decimals, as in the demo CSV.
+    ``agrees`` is ``pred_a == pred_b`` and ``confidence_delta`` is
+    ``|confidence_a - confidence_b|``, whenever those columns exist; a supplied column is
+    replaced. The tolerance on ``confidence_delta`` (1e-5) accepts values rounded to 6
+    decimals, as in the demo CSV. compute_all_metrics and generate_ab_report both read
+    the derived columns, so that the metrics, the figures and the report agree.
+
+    Returns:
+        (frame, issues): the copy, and one message per supplied column that disagreed.
     """
-    cols = set(df.columns)
+    out, issues = df.copy(), []
+    cols = set(out.columns)
     if {"pred_a", "pred_b"} <= cols:
         # As objects: pandas refuses to compare categoricals whose categories differ.
-        derived = (df["pred_a"].astype(object) == df["pred_b"].astype(object)).astype(int)
+        derived = (out["pred_a"].astype(object) == out["pred_b"].astype(object)).astype(int)
         if "agrees" in cols:
-            k = int((pd.to_numeric(df["agrees"], errors="coerce") != derived).sum())
+            k = int((pd.to_numeric(out["agrees"], errors="coerce") != derived).sum())
             if k:
-                errors.append({"block": "input", "error": f"agrees disagrees with pred_a == "
-                                                          f"pred_b on {k} row(s); derived values used"})
-        df["agrees"] = derived
+                issues.append(f"agrees disagrees with pred_a == pred_b on {k} row(s); "
+                              f"derived values used")
+        out["agrees"] = derived
     if {"confidence_a", "confidence_b"} <= cols:
-        derived = (pd.to_numeric(df["confidence_a"], errors="coerce")
-                   - pd.to_numeric(df["confidence_b"], errors="coerce")).abs()
+        derived = (pd.to_numeric(out["confidence_a"], errors="coerce")
+                   - pd.to_numeric(out["confidence_b"], errors="coerce")).abs()
         if "confidence_delta" in cols:
-            supplied = pd.to_numeric(df["confidence_delta"], errors="coerce")
+            supplied = pd.to_numeric(out["confidence_delta"], errors="coerce")
             k = int((~np.isclose(supplied, derived, rtol=0.0, atol=1e-5, equal_nan=True)).sum())
             if k:
-                errors.append({"block": "input", "error": f"confidence_delta disagrees with "
-                                                          f"|confidence_a - confidence_b| on {k} "
-                                                          f"row(s); derived values used"})
-        df["confidence_delta"] = derived
+                issues.append(f"confidence_delta disagrees with |confidence_a - confidence_b| "
+                              f"on {k} row(s); derived values used")
+        out["confidence_delta"] = derived
+    return out, issues
 
 
 # ---------------------------------------------------------------------------
