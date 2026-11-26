@@ -15,10 +15,11 @@ Orchestration steps:
         a. Multi-stage β-weight adaptation over N cycles
         b. Export beta history CSV + PDF report
     6. A/B Testing (optional)
-        a. Run both models — classification or segmentation
-        b. Compute full metric suite (Welch t-test, Cohen's d, power, entropy, margin)
-        c. Save report CSV + standard PNGs + advanced PNGs + PDF report
-        d. Dump all metrics to JSON
+        a. Run both models on the same images (or load the demo predictions)
+        b. Compute the cascade: the paired counts, then the diagnostics
+        c. Run the promotion gate with the configured thresholds and print its verdict
+        d. Save the report CSV, ab_metrics.json, ab_decision.json (the verdict), the
+           PNGs and the PDF report, whose cover shows the same verdict
 
 CLI usage:
     python -m steeldefect_active_learning.pipeline.main_pipeline \\
@@ -42,7 +43,7 @@ import random
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
@@ -55,13 +56,13 @@ logger = logging.getLogger("steeldefect_active_learning")
 from steeldefect_active_learning.ab_testing.ab_pipeline import run_ab_comparison
 from steeldefect_active_learning.ab_testing.metrics import (
     compute_all_metrics,
-    confidence_delta_summary,
-    disagreement_rate,
+    derive_summary_columns,
     plot_advanced_comparison,
     plot_advanced_comparison_v2,
     plot_comparison,
-    statistical_significance_test,
+    statistic_label,
 )
+from steeldefect_active_learning.ab_testing.promotion import decide_promotion
 from steeldefect_active_learning.ab_testing.report import generate_ab_report
 from steeldefect_active_learning.active_learning.candidate_selector import (
     _auto_budget_strategy,
@@ -759,170 +760,7 @@ def run_pipeline(cfg: PipelineConfig) -> None:
 
     # ── 5. A/B Testing ───────────────────────────────────────────────
     if cfg.ab_testing.enabled:
-        _banner("A/B TESTING  (Quin & Weyns 2023)")
-        _row("Model B arch",  cfg.model_b.arch)
-        _row("Model B task",  cfg.model_b.task)
-        _row("iou_threshold", cfg.ab_testing.iou_threshold)
-        _row("conf_threshold",cfg.ab_testing.confidence_threshold)
-
-        # ── Demo-data shortcut ────────────────────────────────────────
-        # When both checkpoints are null (no trained weights), random-weight
-        # inference produces degenerate results: each model develops a systematic
-        # bias toward a single class -> 100% disagreement, all margins ~0.026,
-        # all disagreements classified as Borderline. Instead, load pre-generated
-        # realistic predictions from demo_predictions_path when available.
-        _both_null = (cfg.model_a.checkpoint is None and cfg.model_b.checkpoint is None)
-        _demo_path = cfg.ab_testing.demo_predictions_path
-
-        if _both_null and _demo_path and os.path.exists(_demo_path):
-            _info(f"No checkpoints configured - loading demo predictions: {_demo_path}")
-            ab_df = pd.read_csv(_demo_path)
-            _ok(f"Demo data: {len(ab_df)} rows  "
-                f"disagreement={1 - ab_df['agrees'].mean():.1%}  "
-                f"classes={ab_df['pred_a'].nunique()}")
-        else:
-            model_b = load_model(
-                arch=cfg.model_b.arch,
-                checkpoint=cfg.model_b.checkpoint,
-                num_classes=cfg.model_b.num_classes,
-                device=device,
-                task=cfg.model_b.task,
-            )
-
-            _info("Running A/B comparison ...")
-            ab_df = run_ab_comparison(
-                model_a=model_a,
-                model_b=model_b,
-                dataloader=loader,
-                task=cfg.model_a.task,
-                device=device,
-                iou_threshold=cfg.ab_testing.iou_threshold,
-                confidence_threshold=cfg.ab_testing.confidence_threshold,
-                store_probs=True,
-            )
-
-        # ── Full metric suite ─────────────────────────────────────────
-        all_metrics = compute_all_metrics(
-            ab_df,
-            task=cfg.model_a.task,
-            alpha=cfg.ab_testing.alpha,
-            correction=cfg.ab_testing.multiple_testing_correction,
-            srm_threshold=cfg.ab_testing.srm_threshold,
-            expected_ratio=cfg.ab_testing.expected_arm_ratio,
-            cuped_covariate=cfg.ab_testing.cuped_covariate,
-            bootstrap_n=cfg.ab_testing.bootstrap_n,
-            bayesian=True,  # always run; cheap given existing data
-            bayesian_decision_threshold=cfg.ab_testing.bayesian_decision_threshold,
-            sequential=cfg.ab_testing.sequential,
-        )
-        stat  = all_metrics["statistical"]
-        pwr   = all_metrics["power"]
-        delta = all_metrics["delta"]
-        dr    = all_metrics["disagreement"]["rate"]
-        srm   = all_metrics.get("srm", {})
-
-        print()
-        if not srm.get("applicable", True):
-            _row("SRM check", f"not applicable ({srm.get('reason')})")
-        elif srm.get("srm_detected"):
-            _warn(
-                f"SRM DETECTED  observed_ratio_a={srm.get('observed_ratio_a'):.3f} "
-                f"(expected {srm.get('expected_ratio'):.3f})  "
-                f"chi2={srm.get('chi2'):.2f}  p={srm.get('p_value'):.2e}  "
-                "— results may be invalid; investigate the randomiser."
-            )
-        else:
-            _row("SRM check",
-                 f"observed_ratio_a={srm.get('observed_ratio_a', float('nan')):.3f}  "
-                 f"p={srm.get('p_value', float('nan')):.3f}  [OK]")
-
-        _row("Disagreement rate",  f"{dr:.1%}  "
-             + ("[!] HIGH" if dr > 0.15 else "[OK]"))
-        _row("Welch t / p-value",  f"t={stat['t_stat']:.3f}  "
-             f"p={stat['p_value']:.4f}  "
-             + ("-> SIGNIFICANT" if stat["significant"] else "-> not significant"))
-        _row("Cohen's d (Hedges)",
-             f"{stat['cohens_d']:.4f} / {stat.get('cohens_d_hedges', float('nan')):.4f}  "
-             f"({stat['effect_magnitude']})")
-        _row("95% CI (A-B)",       f"({stat['confidence_interval_95'][0]:.4f}, "
-             f"{stat['confidence_interval_95'][1]:.4f})")
-        _row("Statistical power",  f"{pwr['achieved_power']:.1%}  "
-             + ("[OK] adequate" if pwr["adequately_powered"] else
-                f"[!] need n>={pwr['required_n_for_80pct']} per group"))
-        _row("Conf delta mean/p90",f"{delta['mean']:.4f} / {delta['p90']:.4f}")
-        if "mcnemar" in all_metrics:
-            mc = all_metrics["mcnemar"]
-            _row("McNemar (paired)",
-                 f"b={mc['b']} c={mc['c']}  stat={mc['statistic']:.3f}  "
-                 f"p={mc['p_value']:.4f}  [{mc['test_used']}]")
-        if "per_class_mcnemar" in all_metrics:
-            pcm = all_metrics["per_class_mcnemar"]
-            n_sig = sum(1 for r in pcm["rows"] if r["reject"])
-            _row(f"Per-class McNemar ({pcm['method']})",
-                 f"{n_sig}/{len(pcm['rows'])} classes reject H0  alpha={pcm['alpha']}")
-        if "entropy" in all_metrics:
-            ent = all_metrics["entropy"]
-            _row("Entropy A vs B",
-                 f"H_A={ent.get('mean_entropy_a', 0):.4f}  "
-                 f"H_B={ent.get('mean_entropy_b', 0):.4f}  "
-                 f"(winner={ent.get('entropy_winner', '?')})")
-        if "segmentation" in all_metrics:
-            seg = all_metrics["segmentation"]
-            _row("Mean IoU",    f"{seg.get('mean_iou', 0):.4f}")
-            _row("Mean Dice",   f"{seg.get('mean_dice', 0):.4f}")
-            _row("Boundary IoU",f"{seg.get('mean_boundary_iou', 0):.4f}")
-
-        # ── Export ───────────────────────────────────────────────────
-        reports_dir = os.path.join(cfg.output.dir, "reports")
-        os.makedirs(reports_dir, exist_ok=True)
-
-        # Raw comparison CSV
-        ab_out = os.path.join(cfg.output.dir, cfg.output.ab_report_file)
-        ab_df.to_csv(ab_out, index=False)
-        _ok(f"A/B report CSV: {ab_out}")
-
-        # All metrics JSON
-        metrics_json = os.path.join(cfg.output.dir, "ab_metrics.json")
-        _dump_metrics_json(all_metrics, metrics_json)
-        _ok(f"Metrics JSON:   {metrics_json}")
-
-        # Standard diagnostic PNGs
-        plot_comparison(
-            df=ab_df,
-            output_dir=cfg.output.plots_dir,
-            task=cfg.model_a.task,
-        )
-        _ok(f"Standard plots: {cfg.output.plots_dir}/ab_*.png")
-
-        # Advanced diagnostic PNGs (entropy, calibration, bands, margin)
-        plot_advanced_comparison(
-            df=ab_df,
-            output_dir=cfg.output.plots_dir,
-            model_a_name=cfg.model_a.arch,
-            model_b_name=cfg.model_b.arch,
-        )
-        _ok(f"Advanced plots: {cfg.output.plots_dir}/ab_entropy_*.png etc.")
-
-        # Deep-dive advanced plots (KDE, violin, entropy CDF, disagreement decomposition)
-        plot_advanced_comparison_v2(
-            df=ab_df,
-            output_dir=cfg.output.plots_dir,
-            prefix="ab",
-            model_a_name=cfg.model_a.arch,
-            model_b_name=cfg.model_b.arch,
-        )
-        _ok(f"Deep-dive plots: {cfg.output.plots_dir}/ab_kde_*.png etc.")
-
-        # Multi-page PDF report
-        pdf_path = os.path.join(reports_dir, "ab_report.pdf")
-        generate_ab_report(
-            df=ab_df,
-            output_path=pdf_path,
-            model_a_name=cfg.model_a.arch,
-            model_b_name=cfg.model_b.arch,
-            task=cfg.model_a.task,
-        )
-        _ok(f"PDF report:     {pdf_path}")
+        _run_ab_testing(cfg, model_a, loader, device)
 
     # ── Done ─────────────────────────────────────────────────────────
     elapsed = (datetime.now() - run_start).total_seconds()
@@ -930,28 +768,222 @@ def run_pipeline(cfg: PipelineConfig) -> None:
 
 
 # ---------------------------------------------------------------------------
+# A/B testing (section 5)
+# ---------------------------------------------------------------------------
+
+def _run_ab_testing(cfg: PipelineConfig, model_a, loader, device: str) -> Dict[str, Any]:
+    """Compare A and B on the same images, and run the promotion gate.
+
+    The decision is the gate's (``ab_testing.promotion.decide_promotion``, with the
+    thresholds of ``ab_testing.promotion`` in the config); every other number printed
+    here is a diagnostic. Writes the comparison CSV, ``ab_metrics.json`` (the cascade),
+    ``ab_decision.json`` (the gate's verdict), the figures, and the PDF report, whose
+    cover shows the same verdict. Both JSON files are strict JSON.
+
+    ``ab_metrics.json`` keeps the diagnostic blocks as compute_all_metrics returns them,
+    with their own labels (the Bayesian blocks' ship_b or keep_a, the sequential block's
+    decision, the entropy and margin "winner"): they are diagnostics, and the decision is
+    the one in ``ab_decision.json``.
+
+    The gate needs labels. The demo predictions carry them; with model checkpoints,
+    ``run_ab_comparison`` reads the images without their labels and returns no ``label``
+    column, so the gate fails closed (keep_A, invalid_input) until labels are joined.
+
+    Returns:
+        {"metrics": the cascade, "verdict": the gate's verdict, "paths": the files}.
+    """
+    _banner("A/B TESTING  (paired evaluation)")
+    _row("Model B arch",  cfg.model_b.arch)
+    _row("Model B task",  cfg.model_b.task)
+    _row("iou_threshold", cfg.ab_testing.iou_threshold)
+
+    # ── Demo-data shortcut ────────────────────────────────────────────
+    # When both checkpoints are null (no trained weights), random-weight inference
+    # produces degenerate results: each model develops a systematic bias toward a
+    # single class. Load pre-generated predictions from demo_predictions_path instead.
+    both_null = cfg.model_a.checkpoint is None and cfg.model_b.checkpoint is None
+    demo_path = cfg.ab_testing.demo_predictions_path
+    if both_null and demo_path and os.path.exists(demo_path):
+        _info(f"No checkpoints configured - loading demo predictions: {demo_path}")
+        ab_df = pd.read_csv(demo_path)
+        _ok(f"Demo data: {len(ab_df)} rows  classes={ab_df['pred_a'].nunique()}")
+    else:
+        model_b = load_model(
+            arch=cfg.model_b.arch,
+            checkpoint=cfg.model_b.checkpoint,
+            num_classes=cfg.model_b.num_classes,
+            device=device,
+            task=cfg.model_b.task,
+        )
+        _info("Running A/B comparison ...")
+        ab_df = run_ab_comparison(
+            model_a=model_a,
+            model_b=model_b,
+            dataloader=loader,
+            task=cfg.model_a.task,
+            device=device,
+            iou_threshold=cfg.ab_testing.iou_threshold,
+            confidence_threshold=cfg.ab_testing.confidence_threshold,
+            store_probs=True,
+        )
+
+    # ── The cascade, then the gate ────────────────────────────────────
+    all_metrics = compute_all_metrics(
+        ab_df,
+        task=cfg.model_a.task,
+        alpha=cfg.ab_testing.alpha,
+        correction=cfg.ab_testing.multiple_testing_correction,
+        srm_threshold=cfg.ab_testing.srm_threshold,
+        expected_ratio=cfg.ab_testing.expected_arm_ratio,
+        cuped_covariate=cfg.ab_testing.cuped_covariate,
+        bootstrap_n=cfg.ab_testing.bootstrap_n,
+        bayesian=True,  # always run; cheap given existing data
+        bayesian_decision_threshold=cfg.ab_testing.bayesian_decision_threshold,
+        sequential=cfg.ab_testing.sequential,
+    )
+    verdict = decide_promotion(all_metrics, **cfg.ab_testing.gate_kwargs())
+    _print_verdict(verdict)
+    _print_diagnostics(all_metrics)
+
+    # ── Export ───────────────────────────────────────────────────────
+    # The CSV and the figures read the derived columns, as the cascade does; the report
+    # derives them itself from ab_df, and lists on its cover the columns it replaced.
+    frame, _ = derive_summary_columns(ab_df)
+    reports_dir = os.path.join(cfg.output.dir, "reports")
+    os.makedirs(reports_dir, exist_ok=True)
+    paths = {
+        "csv": os.path.join(cfg.output.dir, cfg.output.ab_report_file),
+        "metrics": os.path.join(cfg.output.dir, "ab_metrics.json"),
+        "decision": os.path.join(cfg.output.dir, "ab_decision.json"),
+        "report": os.path.join(reports_dir, "ab_report.pdf"),
+    }
+    frame.to_csv(paths["csv"], index=False)
+    _ok(f"A/B report CSV: {paths['csv']}")
+    _dump_metrics_json(all_metrics, paths["metrics"])
+    _ok(f"Metrics JSON:   {paths['metrics']}")
+    _dump_metrics_json(verdict, paths["decision"])
+    _ok(f"Decision JSON:  {paths['decision']}")
+
+    plot_comparison(df=frame, output_dir=cfg.output.plots_dir, task=cfg.model_a.task)
+    _ok(f"Standard plots: {cfg.output.plots_dir}/ab_*.png")
+    plot_advanced_comparison(
+        df=frame,
+        output_dir=cfg.output.plots_dir,
+        model_a_name=cfg.model_a.arch,
+        model_b_name=cfg.model_b.arch,
+    )
+    _ok(f"Advanced plots: {cfg.output.plots_dir}/ab_entropy_*.png etc.")
+    plot_advanced_comparison_v2(
+        df=frame,
+        output_dir=cfg.output.plots_dir,
+        prefix="ab",
+        model_a_name=cfg.model_a.arch,
+        model_b_name=cfg.model_b.arch,
+    )
+    _ok(f"Deep-dive plots: {cfg.output.plots_dir}/ab_kde_*.png etc.")
+    generate_ab_report(
+        df=ab_df,                 # the report derives the columns itself, and lists the issues
+        output_path=paths["report"],
+        model_a_name=cfg.model_a.arch,
+        model_b_name=cfg.model_b.arch,
+        task=cfg.model_a.task,
+        alpha=cfg.ab_testing.alpha,
+        verdict=verdict,
+        counts=all_metrics["paired_counts"],
+    )
+    _ok(f"PDF report:     {paths['report']}")
+    return {"metrics": all_metrics, "verdict": verdict, "paths": paths}
+
+
+def _print_verdict(verdict: Dict[str, Any]) -> None:
+    """The gate's decision, then every criterion with the comparison it made."""
+    print()
+    _row("Promotion decision", f"{verdict['decision']}  ({verdict['conclusion']})")
+    for reason in verdict["reasons"]:
+        _row(f"  {'PASS' if reason['passed'] else 'FAIL'} {reason['criterion']}",
+             reason["detail"])
+    for warning in verdict["warnings"]:
+        _warn(f"gate: {warning}")
+
+
+def _print_diagnostics(metrics: Dict[str, Any]) -> None:
+    """The diagnostic blocks that were computed; none of them decides promotion."""
+    print()
+    _info("Diagnostics (they do not decide promotion):")
+    srm = metrics.get("srm")
+    if srm is not None:
+        if not srm.get("applicable", True):
+            _row("SRM check", f"not applicable ({srm.get('reason')})")
+        else:
+            _row("SRM check",
+                 f"observed_ratio_a={srm['observed_ratio_a']:.3f} "
+                 f"(expected {srm['expected_ratio']:.3f})  p={srm['p_value']:.3g}"
+                 + ("  mismatch detected" if srm.get("srm_detected") else ""))
+    if "disagreement" in metrics:
+        _row("Disagreement rate", f"{metrics['disagreement']['rate']:.1%}")
+    stat = metrics.get("statistical")
+    if stat is not None:
+        _row("Confidence test", f"{statistic_label(stat)}  p={stat['p_value']:.4g}  "
+                                f"({stat['test_used']})")
+        _row("Cohen's d (Hedges)",
+             f"{stat['cohens_d']:.4f} / {stat.get('cohens_d_hedges', float('nan')):.4f}  "
+             f"({stat['effect_magnitude']})")
+        ci = stat["confidence_interval_95"]
+        _row("95% CI of conf. A - B", f"({ci[0]:.4f}, {ci[1]:.4f})"
+             if stat["test_used"] == "welch_t" else "n/a (Welch only)")
+    pwr = metrics.get("power")
+    if pwr is not None:
+        _row("Post hoc power", f"{pwr['achieved_power']:.1%}  (at the observed effect)")
+    delta = metrics.get("delta")
+    if delta is not None:
+        _row("Conf delta mean/p90", f"{delta['mean']:.4f} / {delta['p90']:.4f}")
+    if "mcnemar" in metrics:
+        mc = metrics["mcnemar"]
+        _row("McNemar (two-sided)",
+             f"b={mc['b']} c={mc['c']}  stat={mc['statistic']:.3f}  "
+             f"p={mc['p_value']:.4f}  [{mc['test_used']}]")
+    if "per_class_mcnemar" in metrics:
+        pcm = metrics["per_class_mcnemar"]
+        n_sig = sum(1 for r in pcm["rows"] if r["reject"])
+        _row(f"Per-class McNemar ({pcm['method']})",
+             f"{n_sig}/{len(pcm['rows'])} classes reject H0  alpha={pcm['alpha']}")
+    if "entropy" in metrics:
+        ent = metrics["entropy"]
+        _row("Entropy A vs B",
+             f"H_A={ent.get('mean_entropy_a', 0):.4f}  "
+             f"H_B={ent.get('mean_entropy_b', 0):.4f}")
+    if "segmentation" in metrics:
+        seg = metrics["segmentation"]
+        _row("Mean IoU",    f"{seg.get('mean_iou', 0):.4f}")
+        _row("Mean Dice",   f"{seg.get('mean_dice', 0):.4f}")
+        _row("Boundary IoU", f"{seg.get('mean_boundary_iou', 0):.4f}")
+    for error in metrics.get("diagnostic_errors", []):
+        _warn(f"diagnostic '{error['block']}': {error['error']}")
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _strict(obj):
+    """numpy scalars and arrays to Python values, and non-finite floats to None."""
+    if isinstance(obj, np.generic):
+        obj = obj.item()
+    if isinstance(obj, float):
+        return obj if np.isfinite(obj) else None
+    if isinstance(obj, np.ndarray):
+        return [_strict(v) for v in obj.tolist()]
+    if isinstance(obj, dict):
+        return {str(k): _strict(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_strict(v) for v in obj]
+    return obj
+
+
 def _dump_metrics_json(metrics: dict, path: str) -> None:
-    """Serialise the metrics dict to JSON, converting numpy types."""
-    import numpy as np
-
-    def _convert(obj):
-        if isinstance(obj, (np.integer,)):
-            return int(obj)
-        if isinstance(obj, (np.floating,)):
-            return float(obj)
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        if isinstance(obj, dict):
-            return {k: _convert(v) for k, v in obj.items()}
-        if isinstance(obj, list):
-            return [_convert(v) for v in obj]
-        return obj
-
-    with open(path, "w") as f:
-        json.dump(_convert(metrics), f, indent=2)
+    """Write a dict as strict JSON: numpy types converted, NaN and infinities as null."""
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(_strict(metrics), f, indent=2, allow_nan=False)
 
 
 # ---------------------------------------------------------------------------
