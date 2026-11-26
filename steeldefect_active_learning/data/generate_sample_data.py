@@ -1014,10 +1014,9 @@ def generate_demo_ab_data(
         true_label = int(row["class_id"])
         # Scale controls logit peakiness → confidence distribution spread.
         # Lowered (was 2.5-4.5 / 1.5-3.5) so the softmax max does NOT saturate
-        # near 1.0: this yields wider, OVERLAPPING confidence distributions
-        # (mean_conf_A≈0.74, mean_conf_B≈0.69, std≈0.13) and therefore a finite,
-        # realistic Welch t instead of the degenerate ~1e6 value that betrays
-        # synthetic data.
+        # near 1.0: this yields wider, OVERLAPPING confidence distributions. They
+        # are not normal, so the cascade compares them with Mann-Whitney U, not
+        # Welch's t.
         scale_a = rng.uniform(1.8, 3.2)
         scale_b = rng.uniform(1.7, 3.1)
 

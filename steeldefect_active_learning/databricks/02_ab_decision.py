@@ -44,6 +44,9 @@ def _write_decision(spark, verdict: dict, all_metrics: dict,
     import datetime as _dt
     st = all_metrics.get("statistical", {})
     srm = all_metrics.get("srm", {})
+    # The confidence test ('metric' names it) fills its own columns; the other test's are NaN.
+    welch = st.get("test_used") == "welch_t"
+    mann_whitney = st.get("test_used") == "mann_whitney_u"
     # The gate's own one-sided exact McNemar p and paired posterior (None on invalid input).
     estimates = verdict.get("estimates") or {}
     row = {
@@ -52,10 +55,9 @@ def _write_decision(spark, verdict: dict, all_metrics: dict,
         "model_b_uri": model_b_uri,
         "eval_dataset_id": eval_dataset_id,
         "metric": st.get("test_used"),
-        "welch_t": float(st.get("t_stat", float("nan"))),
-        "welch_p": float(st.get("p_value", float("nan"))),
-        "mannwhitney_p": float(st.get("p_value", float("nan")))
-            if st.get("test_used") == "mann_whitney_u" else float("nan"),
+        "welch_t": float(st.get("t_stat", float("nan"))) if welch else float("nan"),
+        "welch_p": float(st.get("p_value", float("nan"))) if welch else float("nan"),
+        "mannwhitney_p": float(st.get("p_value", float("nan"))) if mann_whitney else float("nan"),
         "mcnemar_p": float(estimates.get("mcnemar_p_one_sided", float("nan"))),
         "bh_reject": bool(any(r.get("reject", False)
                               for r in (all_metrics.get("per_class_mcnemar", {}) or {}).get("rows", []))),

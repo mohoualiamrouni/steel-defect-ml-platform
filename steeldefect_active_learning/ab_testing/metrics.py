@@ -21,7 +21,8 @@ Advanced metrics:
 
 Statistical testing (diagnostics):
     statistical_significance_test — Welch's t-test or Mann-Whitney U on the confidences,
-                                    with Cohen's d (+ Hedges)
+                                    with Cohen's d (+ Hedges) and the signed normal score z
+    statistic_label               — 'Welch t = ...' or 'Mann-Whitney U = ...'
     mcnemar_test                  — two-sided paired-classifier McNemar (Yates / exact)
     per_class_mcnemar             — per-class McNemar suite with multiple-testing correction
     srm_check                     — sample-ratio-mismatch χ² check (traffic splits only)
@@ -590,11 +591,18 @@ def per_class_mcnemar(
 # Statistical significance testing (Quin & Weyns 2023)
 # ---------------------------------------------------------------------------
 
+def statistic_label(stat: Dict) -> str:
+    """'Welch t = 2.31' or 'Mann-Whitney U = 691179', from statistical_significance_test."""
+    if stat.get("test_used") == "mann_whitney_u":
+        return f"Mann-Whitney U = {stat['u_stat']:.0f}"
+    return f"Welch t = {stat['t_stat']:.2f}"
+
+
 def statistical_significance_test(
     df: pd.DataFrame,
     alpha: float = 0.05,
 ) -> Dict:
-    """Welch's t-test comparing Model A vs Model B confidence distributions.
+    """Welch's t-test or Mann-Whitney U comparing the confidences of A and B (a diagnostic).
 
     Implements the hypothesis test framework from Quin & Weyns (2023):
     - H0: μ_A = μ_B  (no difference between models)
@@ -617,11 +625,17 @@ def statistical_significance_test(
         df:    A/B comparison DataFrame with 'confidence_a', 'confidence_b'.
         alpha: Significance level (default 0.05).
 
+    Shapiro-Wilk decides the test: Welch's t when both confidence samples look normal,
+    Mann-Whitney U otherwise (the usual case for confidences, bounded in [0, 1]).
+
     Returns:
         Dict with keys:
-            t_stat, p_value, significant, cohens_d, effect_magnitude,
-            mean_a, mean_b, std_a, std_b, n,
-            confidence_interval_95 (tuple: (lower, upper) of μ_A - μ_B)
+            t_stat (Welch only, NaN under Mann-Whitney), u_stat (Mann-Whitney only, NaN
+            under Welch), z (the signed normal score of the two-sided p-value: the sign
+            of t, or of U - n_a*n_b/2), test_used, p_value, significant, cohens_d,
+            effect_magnitude, mean_a, mean_b, std_a, std_b, n,
+            confidence_interval_95 (tuple: (lower, upper) of μ_A - μ_B; NaN under
+            Mann-Whitney)
     """
     from scipy import stats
 
@@ -637,18 +651,18 @@ def statistical_significance_test(
 
     if use_parametric:
         t_stat, p_value = stats.ttest_ind(a, b, equal_var=False)
+        u_stat = float("nan")
         test_used = "welch_t"
     else:
         u_stat, p_value = stats.mannwhitneyu(a, b, alternative="two-sided")
-        t_stat = float(u_stat)  # store U-stat for backward compat
+        t_stat = float("nan")      # a U statistic is not a t statistic
         test_used = "mann_whitney_u"
 
     # Cohen's d (always computed — meaningful regardless of test)
     pooled_std = math.sqrt((np.var(a, ddof=1) + np.var(b, ddof=1)) / 2.0)
-    # Degenerate-variance guard: with near-constant confidences the denominator
-    # collapses and Welch t / Cohen's d explode to absurd values (the ~1e6
-    # "t-stat" that betrays synthetic, over-confident data). Flag it so callers
-    # can report Mann-Whitney + effect size instead of a meaningless t.
+    # Degenerate-variance guard: with near-constant confidences the pooled standard
+    # deviation collapses, and Cohen's d (and Welch's t, when it runs) become
+    # meaningless. Flag it so that callers can say so.
     degenerate_variance = bool(pooled_std < 1e-3)
     cohens_d = (np.mean(a) - np.mean(b)) / (pooled_std + 1e-12)
 
@@ -664,6 +678,12 @@ def statistical_significance_test(
 
     # 95% confidence interval for (μ_A - μ_B) using Welch-Satterthwaite df
     diff = np.mean(a) - np.mean(b)
+    # The signed normal score of the two-sided p-value: comparable across both tests, and
+    # what a normal-boundary rule (O'Brien-Fleming) reads. Its sign is the direction the
+    # test measures: t's under Welch, U - n_a*n_b/2 under Mann-Whitney (positive when A's
+    # confidences tend to be the higher), which can differ from the sign of mean_a - mean_b.
+    direction = np.sign(t_stat) if use_parametric else np.sign(u_stat - n_a * n_b / 2.0)
+    z = float(direction * stats.norm.isf(float(p_value) / 2.0))
     if use_parametric:
         se = math.sqrt(np.var(a, ddof=1) / n_a + np.var(b, ddof=1) / n_b)
         df_welch = (
@@ -680,6 +700,8 @@ def statistical_significance_test(
 
     return {
         "t_stat":                 float(t_stat),
+        "u_stat":                 float(u_stat),
+        "z":                      z,
         "p_value":                float(p_value),
         "significant":            bool(p_value < alpha),
         "cohens_d":               float(cohens_d),
@@ -917,7 +939,7 @@ def compute_all_metrics(
             }
         # O'Brien-Fleming: treat the current run as the final (and only) look — a sane
         # default; users with multi-look plans can call the helper directly.
-        block = obrien_fleming_decide(z_observed=out["statistical"]["t_stat"],
+        block = obrien_fleming_decide(z_observed=out["statistical"]["z"],
                                       look=1, n_looks=1, alpha=alpha)
         block["method"] = "obrien_fleming"
         return block
@@ -1109,7 +1131,7 @@ def _plot_confidence_delta(df, output_dir, prefix):
                label=f"p90={df['confidence_delta'].quantile(0.9):.3f}")
 
     p_str = f"p={stat['p_value']:.4f}" if stat["p_value"] >= 0.0001 else "p<0.0001"
-    box = (f"Welch t={stat['t_stat']:.2f}, {p_str}\n"
+    box = (f"{statistic_label(stat)}, {p_str}\n"
            f"Cohen's d={stat['cohens_d']:.3f} ({stat['effect_magnitude']})\n"
            f"Power={pwr['achieved_power']:.1%}  n={pwr['n']}")
     ax.text(0.98, 0.95, box, transform=ax.transAxes, va="top", ha="right",
