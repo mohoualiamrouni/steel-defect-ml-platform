@@ -1104,6 +1104,12 @@ def plot_advanced_comparison(
 # Standard plot helpers
 # ---------------------------------------------------------------------------
 
+# Agreement and disagreement: neutral colours, since agreement says nothing about which
+# model is right.
+_AGREE_COLOUR = "#90A4AE"
+_DISAGREE_COLOUR = "#3F51B5"
+
+
 def _plot_disagreement_rate(df, output_dir, prefix):
     stat = statistical_significance_test(df)
     agree    = int(df["agrees"].sum())
@@ -1111,16 +1117,15 @@ def _plot_disagreement_rate(df, output_dir, prefix):
 
     fig, ax = plt.subplots(figsize=(5, 4))
     bars = ax.bar(["Agree", "Disagree"], [agree, disagree],
-                  color=["#4CAF50", "#F44336"], edgecolor="white", linewidth=1.5)
+                  color=[_AGREE_COLOUR, _DISAGREE_COLOUR], edgecolor="white", linewidth=1.5)
     for bar, count in zip(bars, [agree, disagree]):
         ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + len(df) * 0.01,
                 f"{count}\n({count/len(df):.1%})", ha="center", va="bottom", fontsize=10)
 
     p_str  = f"p={stat['p_value']:.4f}" if stat["p_value"] >= 0.0001 else "p<0.0001"
     d_str  = f"d={stat['cohens_d']:.3f} ({stat['effect_magnitude']})"
-    sig_str = "significant" if stat["significant"] else "not significant"
     ax.set_title(f"A/B Agreement  |  disagreement={disagree/len(df):.1%}\n"
-                 f"{p_str}  {d_str}  [{sig_str}]", fontsize=9)
+                 f"confidence test: {p_str}  {d_str}", fontsize=9)
     ax.set_ylabel("Number of images")
     ax.set_ylim(0, max(agree, disagree) * 1.2)
     ax.grid(axis="y", alpha=0.3)
@@ -1171,17 +1176,14 @@ def _class_label(class_id: int) -> str:
 def _plot_per_class_agreement(df, output_dir, prefix):
     stats = per_class_agreement(df)
     fig, ax = plt.subplots(figsize=(max(8, len(stats) * 1.1), 5))
-    colors = ["#4CAF50" if r >= 0.8 else "#FF9800" if r >= 0.5 else "#F44336"
-              for r in stats["agreement_rate"]]
     x_labels = [_class_label(c) for c in stats["class_id"]]
+    # One colour and no cut-off: agreement says nothing about which model is right.
     ax.bar(x_labels, stats["agreement_rate"],
-           color=colors, edgecolor="white", linewidth=1.2)
-    ax.axhline(0.8, color="green", linestyle="--", alpha=0.7, label="80% threshold")
+           color="#2196F3", edgecolor="white", linewidth=1.2)
     ax.set_ylim(0, 1.15)
     ax.set_xlabel("Defect class (predicted by Model A)")
     ax.set_ylabel("Agreement rate")
     ax.set_title("Per-class Agreement Rate — A vs B")
-    ax.legend(fontsize=9)
     plt.setp(ax.get_xticklabels(), rotation=30, ha="right", fontsize=9)
     for i, (r, n) in enumerate(zip(stats["agreement_rate"], stats["count"])):
         ax.text(i, r + 0.02, f"n={n}", ha="center", fontsize=8)
@@ -1321,10 +1323,10 @@ def _plot_entropy_distribution(df, output_dir, prefix, name_a, name_b):
     agrees_mask = df["agrees"] == 1
     axes[1].scatter(df.loc[agrees_mask, "entropy_a"],
                     df.loc[agrees_mask, "entropy_b"],
-                    alpha=0.25, s=8, color="#4CAF50", label="Agree")
+                    alpha=0.25, s=8, color=_AGREE_COLOUR, label="Agree")
     axes[1].scatter(df.loc[~agrees_mask, "entropy_a"],
                     df.loc[~agrees_mask, "entropy_b"],
-                    alpha=0.5, s=8, color="#F44336", label="Disagree")
+                    alpha=0.5, s=8, color=_DISAGREE_COLOUR, label="Disagree")
     lim = max(df["entropy_a"].max(), df["entropy_b"].max()) * 1.05
     axes[1].plot([0, lim], [0, lim], "k--", alpha=0.3, lw=1)
     axes[1].set_xlabel(f"Entropy — {name_a}")
@@ -1345,22 +1347,18 @@ def _plot_confidence_bands(df, output_dir, prefix):
 
     fig, axes = plt.subplots(1, 2, figsize=(11, 4))
 
-    # Disagreement rate per band
-    colors = ["#4CAF50" if r < 0.05 else "#FF9800" if r < 0.15 else "#F44336"
-              for r in band_df["disagreement_rate"]]
+    # Disagreement rate per band: one colour and no cut-off (it decides nothing)
     bars = axes[0].bar(band_df["band"], band_df["disagreement_rate"],
-                       color=colors, edgecolor="white", linewidth=1.2)
+                       color="#2196F3", edgecolor="white", linewidth=1.2)
     for bar, row in zip(bars, band_df.itertuples()):
         axes[0].text(bar.get_x() + bar.get_width() / 2,
                      bar.get_height() + 0.005,
                      f"n={row.n}", ha="center", fontsize=8)
-    axes[0].axhline(0.10, color="#F44336", linestyle="--", alpha=0.6, label="10% threshold")
     axes[0].set_ylim(0, 1.0)
     axes[0].set_xlabel("Confidence band (Model A)")
     axes[0].set_ylabel("Disagreement rate")
     axes[0].set_title("Disagreement Rate by Confidence Band\n"
                       "High disagreement at high confidence = systematic difference")
-    axes[0].legend(fontsize=9)
     axes[0].grid(axis="y", alpha=0.3)
 
     # Entropy per band (if available)
@@ -1389,8 +1387,8 @@ def _plot_confidence_bands(df, output_dir, prefix):
 def _plot_per_class_accuracy_delta(df, output_dir, prefix, name_a, name_b):
     """Per-class accuracy delta: acc(B) − acc(A) for each class.
 
-    Green bars = B improved.  Red bars = B degraded.
-    THE most actionable viz for deployment: "will any class suffer if we switch?"
+    Green bars: Δ ≥ 0, red bars: Δ < 0, both point estimates with bootstrap intervals.
+    The gate's no_class_regression clause decides on per-class lower bounds, not here.
 
     Requires: pred_a, pred_b, label columns.
     Falls back gracefully if 'label' column is missing.
@@ -1464,8 +1462,7 @@ def _plot_per_class_accuracy_delta(df, output_dir, prefix, name_a, name_b):
 
     for i, (d, a_a, a_b) in enumerate(zip(deltas, acc_a_list, acc_b_list)):
         n_cls = int((df["label"] == classes[i]).sum())
-        tag = "DEGRADED " if d < -0.05 else ("IMPROVED " if d > 0.05 else "")
-        label = f"{tag}A:{a_a:.0%}\u2192B:{a_b:.0%} (n={n_cls})"
+        label = f"A:{a_a:.0%}\u2192B:{a_b:.0%} (n={n_cls})"
         # Add significance stars (BH-corrected)
         lbl = x_labels[i]
         if lbl in sig_map:
@@ -1486,7 +1483,7 @@ def _plot_per_class_accuracy_delta(df, output_dir, prefix, name_a, name_b):
         else:
             x_pos = d + (0.005 if d >= 0 else -0.005)
             ha = "left" if d >= 0 else "right"
-            txt_color = "#C62828" if d < -0.05 else "#212121"
+            txt_color = "#212121"
             fw = "normal"
         ax.text(x_pos, i, label, ha=ha, va="center", fontsize=7,
                 color=txt_color, fontweight=fw)
@@ -1495,7 +1492,7 @@ def _plot_per_class_accuracy_delta(df, output_dir, prefix, name_a, name_b):
     ax.set_yticklabels(x_labels, fontsize=9)
     ax.set_xlabel("Accuracy delta  (acc_B − acc_A)")
     ax.set_title("Per-class Accuracy Delta  (BH-corrected, 95% bootstrap CI)\n"
-                 "Green = B improved  ·  Red = B degraded  ·  "
+                 "green: Δ ≥ 0  ·  red: Δ < 0  (point estimates)  ·  "
                  "* p<.05  ** p<.01  *** p<.001", fontsize=9)
     ax.grid(axis="x", alpha=0.3)
     ax.invert_yaxis()
@@ -1523,7 +1520,7 @@ def plot_advanced_comparison_v2(
     Saved files:
         {prefix}_kde_heatmap.png            — 2D KDE density of conf_a vs conf_b
         {prefix}_violin_per_class.png       — confidence violin per class (A vs B)
-        {prefix}_mcnemar_test.png           — McNemar per-class significance test
+        {prefix}_mcnemar_test.png           — McNemar's two-sided paired test (a diagnostic)
         {prefix}_disagreement_decomposition.png — systematic/borderline/random split
     """
     os.makedirs(output_dir, exist_ok=True)
@@ -1569,9 +1566,9 @@ def _plot_kde_heatmap(df, output_dir, prefix, name_a, name_b):
     # Scatter overlay coloured by agreement
     agrees = df["agrees"].values
     ax.scatter(ca[agrees == 1], cb[agrees == 1],
-               s=6, alpha=0.25, color="#4CAF50", label="Agree")
+               s=6, alpha=0.25, color=_AGREE_COLOUR, label="Agree")
     ax.scatter(ca[agrees == 0], cb[agrees == 0],
-               s=6, alpha=0.45, color="#F44336", label="Disagree")
+               s=6, alpha=0.45, color=_DISAGREE_COLOUR, label="Disagree")
 
     # Auto-zoom to where data actually is (with a small margin)
     margin = 0.04
@@ -1649,56 +1646,47 @@ def _plot_violin_per_class(df, output_dir, prefix, name_a, name_b):
 
 
 def _plot_mcnemar_test(df, output_dir, prefix, name_a, name_b):
-    """McNemar's paired classifier test (McNemar 1947).
+    """McNemar's paired classifier test (McNemar 1947), a diagnostic.
 
     Two-panel figure:
         Left:  2×2 contingency heatmap (A-correct/B-correct counts).
-        Right: Statistical results (χ², p-value, interpretation).
+        Right: the two-sided test's results.
 
-    Requires columns: pred_a, pred_b, label (ground truth).
-    Falls back to a placeholder if 'label' column is missing.
+    Reads the counts that paired.paired_counts validated and tests them with
+    paired.mcnemar_two_sided, as compute_all_metrics does; on a slice that breaks the
+    paired contract (no labels, a repeated or missing image id, an 'arm' column), it
+    lists why instead.
     """
-    from scipy import stats as sp_stats
-
     fig, axes = plt.subplots(1, 2, figsize=(11, 5))
     fig.subplots_adjust(top=0.85, bottom=0.12, wspace=0.35)
 
-    if "label" not in df.columns or "pred_a" not in df.columns or "pred_b" not in df.columns:
+    pc = paired_counts(df)
+    if not pc["valid"]:
         for ax in axes:
-            ax.text(0.5, 0.5, "McNemar's test requires\npred_a, pred_b, label columns",
-                    ha="center", va="center", fontsize=11, color="#607D8B",
-                    transform=ax.transAxes)
             ax.axis("off")
+        axes[0].text(0.0, 0.5, "No McNemar test: the slice is not a valid paired evaluation\n\n"
+                     + "\n".join(e[:90] for e in pc["errors"][:4]),
+                     ha="left", va="center", fontsize=9, color="#607D8B",
+                     transform=axes[0].transAxes)
         fig.suptitle("McNemar's Paired Classifier Test — data unavailable", fontsize=10)
         fig.savefig(os.path.join(output_dir, f"{prefix}_mcnemar_test.png"), dpi=150)
         plt.close(fig)
         return
 
-    # Build 2×2 contingency table
-    a_correct = (df["pred_a"] == df["label"]).values
-    b_correct = (df["pred_b"] == df["label"]).values
-    n00 = int((a_correct & b_correct).sum())       # both right
-    n01 = int((a_correct & ~b_correct).sum())      # A right, B wrong
-    n10 = int((~a_correct & b_correct).sum())      # B right, A wrong
-    n11 = int((~a_correct & ~b_correct).sum())     # both wrong
-    n_total = len(df)
+    # paired.py's names: n11 both right, n10 only A right, n01 only B right, n00 both wrong.
+    n11, n10 = pc["both_correct"], pc["only_a_correct"]
+    n01, n00 = pc["only_b_correct"], pc["both_wrong"]
+    n_total = pc["n"]
+    discordant = n10 + n01
+    result = mcnemar_two_sided(n10, n01)
+    p_value = result["p_value"]
+    chi2 = result["statistic"] if result["test_used"] == "mcnemar_yates" else float("nan")
+    test_type = {"mcnemar_yates": "χ² (continuity-corrected)",
+                 "mcnemar_exact": "Exact binomial",
+                 "mcnemar_degenerate": "No discordant pairs"}[result["test_used"]]
 
-    # McNemar test statistic
-    discordant = n01 + n10
-    if discordant >= 25:
-        chi2 = (abs(n01 - n10) - 1) ** 2 / discordant
-        p_value = float(sp_stats.chi2.sf(chi2, df=1))
-        test_type = "χ² (continuity-corrected)"
-    elif discordant > 0:
-        p_value = float(sp_stats.binomtest(n01, discordant, 0.5).pvalue)
-        chi2 = float("nan")
-        test_type = "Exact binomial"
-    else:
-        chi2, p_value = 0.0, 1.0
-        test_type = "No discordant pairs"
-
-    # Left panel: 2×2 heatmap
-    table = np.array([[n00, n01], [n10, n11]])
+    # Left panel: 2×2 heatmap (rows: A right / wrong; columns: B right / wrong)
+    table = np.array([[n11, n10], [n01, n00]])
     ax = axes[0]
     im = ax.imshow(table, cmap="RdYlGn", vmin=0, vmax=max(n_total // 2, 1))
     ax.set_xticks([0, 1])
@@ -1713,33 +1701,29 @@ def _plot_mcnemar_test(df, output_dir, prefix, name_a, name_b):
                     color="white" if table[i, j] > n_total * 0.3 else "black")
     ax.set_title("McNemar Contingency Table\n(rows = A, cols = B)", fontsize=9)
 
-    # Right panel: statistical results
+    # Right panel: the test's results, and no verdict (the promotion gate decides)
     ax2 = axes[1]
     ax2.axis("off")
-    verdict = "Models differ significantly" if p_value < 0.05 else "No significant difference"
-    verdict_color = "#F44336" if p_value < 0.05 else "#4CAF50"
 
     lines = [
         ("Test type:", test_type),
-        ("χ² statistic:", f"{chi2:.4f}" if np.isfinite(chi2) else "N/A (exact test)"),
-        ("p-value:", f"{p_value:.6f}"),
+        {"mcnemar_yates": ("χ² statistic:", f"{chi2:.4f}"),
+         "mcnemar_exact": ("χ² statistic:", "N/A (exact test)"),
+         "mcnemar_degenerate": ("χ² statistic:", "no test: no discordant pairs")}[
+            result["test_used"]],
+        ("p-value:", f"{p_value:.6f}  (two-sided)"),
         ("", ""),
-        ("Discordant pairs:", f"{discordant}  (n₀₁={n01}, n₁₀={n10})"),
-        ("Concordant pairs:", f"{n00 + n11}  (both right={n00}, both wrong={n11})"),
+        ("Discordant pairs:", f"{discordant}  (n₁₀={n10} only A, n₀₁={n01} only B)"),
+        ("Concordant pairs:", f"{n11 + n00}  (n₁₁={n11} both, n₀₀={n00} neither)"),
         ("", ""),
-        ("Accuracy A:", f"{(n00 + n01) / max(n_total, 1):.1%}"),
-        ("Accuracy B:", f"{(n00 + n10) / max(n_total, 1):.1%}"),
+        ("Accuracy A:", f"{(n11 + n10) / max(n_total, 1):.1%}"),
+        ("Accuracy B:", f"{(n11 + n01) / max(n_total, 1):.1%}"),
         ("", ""),
-        ("Verdict:", verdict),
+        ("Note:", "a diagnostic: the promotion gate decides"),
     ]
     y = 0.92
     for key, val in lines:
-        if key == "Verdict:":
-            ax2.text(0.05, y, key, fontsize=10, fontweight="bold",
-                     transform=ax2.transAxes, color="#212121")
-            ax2.text(0.40, y, val, fontsize=10, fontweight="bold",
-                     transform=ax2.transAxes, color=verdict_color)
-        elif key:
+        if key:
             ax2.text(0.05, y, key, fontsize=9, color="#607D8B",
                      transform=ax2.transAxes, fontstyle="italic")
             ax2.text(0.40, y, val, fontsize=9, color="#212121",
@@ -1748,7 +1732,7 @@ def _plot_mcnemar_test(df, output_dir, prefix, name_a, name_b):
 
     fig.suptitle("McNemar's Paired Classifier Test (McNemar 1947)\n"
                  "H₀: both models have the same error rate  ·  "
-                 "Uses only discordant pairs (n₀₁ vs n₁₀)",
+                 "Uses only discordant pairs (n₁₀ vs n₀₁)",
                  fontsize=10, fontweight="bold", y=0.98)
 
     fig.savefig(os.path.join(output_dir, f"{prefix}_mcnemar_test.png"), dpi=150)
@@ -1767,7 +1751,7 @@ def _plot_disagreement_decomposition(df, output_dir, prefix):
     if len(disagree) == 0:
         # All agree — show a single bar labeled "0% disagreement"
         fig, ax = plt.subplots(figsize=(5, 4))
-        ax.bar(["Disagreement"], [0], color="#4CAF50")
+        ax.bar(["Disagreement"], [0], color=_AGREE_COLOUR)
         ax.set_ylim(0, 1)
         ax.set_title("Disagreement Decomposition\n(0% disagreement — models fully agree)")
         fig.tight_layout()
@@ -1809,7 +1793,7 @@ def _plot_disagreement_decomposition(df, output_dir, prefix):
     agree_count = int(df["agrees"].sum())
     all_counts = [agree_count] + list(counts.values())
     all_labels = ["Agree"] + list(counts.keys())
-    all_colors = ["#4CAF50"] + bar_colors
+    all_colors = [_AGREE_COLOUR] + bar_colors
     bottom = 0
     for label, count, color in zip(all_labels, all_counts, all_colors):
         axes[1].bar(["All images"], [count], bottom=bottom,
