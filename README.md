@@ -11,7 +11,7 @@ profiles.
 
 | Pipeline | What it does | Code |
 |---|---|---|
-| **P1: Active learning and A/B** | select the most informative images to label; decide model promotion with a paired, fail-closed statistical gate (`ab_testing/promotion.py`), a library function that neither the CLI pipeline nor the Databricks bundle runs yet | `steeldefect_active_learning/` |
+| **P1: Active learning and A/B** | select the most informative images to label; decide model promotion with a paired, fail-closed statistical gate (`ab_testing/promotion.py`), which the CLI pipeline runs and reports (`ab_decision.json`, and the cover of the PDF report) on labelled predictions such as the demo set (with model checkpoints its A/B step does not read the images' labels yet, so the gate keeps A), and which the Databricks bundle does not run yet | `steeldefect_active_learning/` |
 | **P2: Defect regrouping** | fuse CNN and morphology features, discover defect families (mini-batch k-means by default; GMM, HDBSCAN, DP-GMM and a lightweight DeepDPM re-implementation as options) | `defect_clustering/` |
 | **P3: Datamining and cutting** | severity regression (XGBoost with conformalized quantile regression), then a guillotine cutting-plan optimizer | `datamining/` |
 | **P4: Self-supervised core** | self-supervised contrastive encoder (SimCLR / NT-Xent; an optional SimSiam comparison is off by default), open-set detection, generalized category discovery, continual NCM | `steeldefect_ssl/` |

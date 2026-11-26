@@ -10,7 +10,9 @@ import pandas as pd
 import pytest
 import yaml
 
-from steeldefect_active_learning.ab_testing.metrics import compute_all_metrics
+from steeldefect_active_learning.ab_testing.metrics import (
+    compute_all_metrics, statistical_significance_test,
+)
 from steeldefect_active_learning.ab_testing.promotion import decide_promotion
 from steeldefect_active_learning.config import SHIPPED_CONFIG_PATH, load_config
 from steeldefect_platform.obt_schema import COMPANION_DDL
@@ -134,6 +136,37 @@ def test_job_stores_the_configured_gate_verdict(job, registry_calls, config_path
     assert row["prob_b_better"] == pytest.approx(expected["estimates"]["p_b_better_posterior"], rel=1e-12)
     # No model version: the job never touches the registry.
     assert promoted is None and row["promoted_model_uri"] is None and registry_calls == []
+
+
+def _normal_confidences(df: pd.DataFrame) -> pd.DataFrame:
+    """The same images with normal confidences: Shapiro-Wilk keeps Welch's t (seed 1)."""
+    rng = np.random.default_rng(1)
+    return df.assign(confidence_a=rng.normal(0.70, 0.05, len(df)),
+                     confidence_b=rng.normal(0.68, 0.05, len(df)))
+
+
+@pytest.mark.parametrize("make, test_used", [
+    (_promote_frame, "mann_whitney_u"),
+    (lambda: _normal_confidences(_promote_frame()), "welch_t"),
+], ids=["uniform confidences", "normal confidences"])
+def test_job_stores_each_confidence_test_in_its_own_columns(job, registry_calls, config_path,
+                                                            make, test_used):
+    # A Mann-Whitney run used to store its U as welch_t and its p-value as welch_p.
+    df = make()
+    spark = FakeSpark(df)
+    job.main(spark, "eval-1", "a", "b", config_path=config_path)
+    row = spark.saved[0][1][0]
+    stat = statistical_significance_test(df)
+    assert row["metric"] == stat["test_used"] == test_used
+    welch = test_used == "welch_t"
+    expected = {"welch_t": stat["t_stat"] if welch else None,
+                "welch_p": stat["p_value"] if welch else None,
+                "mannwhitney_p": None if welch else stat["p_value"]}
+    for column, value in expected.items():
+        if value is None:
+            assert np.isnan(row[column]), column
+        else:
+            assert row[column] == pytest.approx(value, rel=1e-12), column
 
 
 def test_job_promotes_only_with_a_model_version(job, registry_calls, config_path):

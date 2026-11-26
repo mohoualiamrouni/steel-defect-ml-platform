@@ -4,17 +4,28 @@ A/B Testing PDF Report Generator
 
 Generates a multi-page PDF report from an A/B comparison DataFrame.
 
+The promotion decision belongs to the gate (``ab_testing.promotion.decide_promotion``);
+the report shows its verdict when it is given one, and every other number in it is a
+diagnostic. ``agrees`` and ``confidence_delta`` are recomputed from the columns they
+summarise (``metrics.derive_summary_columns``), as in compute_all_metrics.
+
 Pages:
-    1. Cover page  — title, key scalar metrics, run metadata
-    2. Statistical significance — Welch t-test, Cohen's d, 95% CI, power analysis
-    3. Disagreement rate bar chart  (annotated with p-value and effect size)
-    4. Confidence delta distribution  (histogram + statistics box)
-    5. Per-class agreement rates  (classification only)
-    6. IoU / segmentation comparison  (segmentation only)
-    7. Confidence scatter  — Model A vs Model B per image
-    8. Summary table  — all metrics in one printable page
-    9. Calibration analysis — reliability diagram, ECE/MCE, pre/post temperature scaling
-   10. Uncertainty decomposition — aleatoric vs epistemic per class (BALD only)
+    1. Cover  — the gate's verdict, key numbers, data-quality warnings
+    2. Promotion gate  — every criterion, the per-class bounds and the false-alarm
+       vetoes (only when a verdict is given)
+    3. Diagnostics on the confidences  — Welch's t or Mann-Whitney U, Cohen's d, post
+       hoc power
+    4. McNemar  — paired correctness of A and B
+    5. Confidence delta distribution
+    6. Per-class agreement  (classification only)
+    7. Per-class accuracy delta
+    8. IoU  (segmentation only)
+    9. Confidence scatter  — Model A vs Model B per image
+   10. KDE and violin per class
+   11. Entropy and disagreement
+   12. Calibration analysis  — reliability diagram, ECE/MCE
+   13. Summary table
+   14. Uncertainty decomposition  (BALD columns only)
 
 Uses only matplotlib (PdfPages) — no external PDF library required.
 
@@ -34,8 +45,9 @@ Usage
 from __future__ import annotations
 
 import os
+import textwrap
 from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 import matplotlib
 matplotlib.use("Agg")
@@ -47,10 +59,14 @@ import numpy as np
 import pandas as pd
 from scipy import stats as scipy_stats
 
+from steeldefect_active_learning.ab_testing.paired import (
+    mcnemar_two_sided, paired_counts, paired_counts_errors,
+)
 from steeldefect_active_learning.ab_testing.metrics import (
     aleatoric_epistemic_report,
     calibration_under_shift,
     confidence_delta_summary,
+    derive_summary_columns,
     disagreement_rate,
     expected_calibration_error,
     maximum_calibration_error,
@@ -58,6 +74,7 @@ from steeldefect_active_learning.ab_testing.metrics import (
     power_analysis,
     required_sample_size,
     statistical_significance_test,
+    statistic_label,
     _STEELDEFECT_CLASS_NAMES,
 )
 
@@ -91,6 +108,8 @@ def generate_ab_report(
     model_b_name: str = "Model B",
     task: str = "classification",
     alpha: float = 0.05,
+    verdict: Optional[Dict[str, Any]] = None,
+    counts: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Generate a multi-page PDF report for an A/B comparison.
 
@@ -100,22 +119,40 @@ def generate_ab_report(
         model_a_name:  Display name for Model A.
         model_b_name:  Display name for Model B.
         task:          'classification' or 'segmentation'.
-        alpha:         Significance level for all statistical tests.
+        alpha:         Level of the diagnostic tests.
+        verdict:       The promotion gate's verdict (decide_promotion). The cover shows
+                       it, and a page lists its criteria; without it, the cover says that
+                       no verdict was computed.
+        counts:        The cascade's ``paired_counts`` block (compute_all_metrics), which
+                       the cover's accuracies and the McNemar page read: pass it when the
+                       cascade used other columns (class_col, id_col, cluster_col). Without
+                       it, ``paired.paired_counts(df)`` with its default columns.
 
     Returns:
         Absolute path to the saved PDF.
     """
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
+    df, issues = derive_summary_columns(df)
+    # The gate's validated counts, for the cover and the McNemar page. A block passed in is
+    # checked as the gate checks it: one built by hand or read back can be inconsistent.
+    if counts is None:
+        pc = paired_counts(df)
+    else:
+        problems = paired_counts_errors(counts)
+        pc = counts if not problems else {"valid": False, "errors": problems}
     stat  = statistical_significance_test(df, alpha=alpha)
     pwr   = power_analysis(df, alpha=alpha)
     delta = confidence_delta_summary(df)
     dr    = disagreement_rate(df)
 
     with PdfPages(output_path) as pdf:
-        _page_cover(pdf, df, stat, pwr, dr, model_a_name, model_b_name, task, alpha)
+        _page_cover(pdf, df, stat, pwr, dr, model_a_name, model_b_name, task, alpha,
+                    verdict, issues, pc)
+        if verdict is not None:
+            _page_gate(pdf, verdict, model_a_name, model_b_name)
         _page_statistics(pdf, stat, pwr, delta, model_a_name, model_b_name, alpha)
-        _page_mcnemar(pdf, df, model_a_name, model_b_name)
+        _page_mcnemar(pdf, pc, model_a_name, model_b_name, alpha)
         _page_confidence_delta(pdf, df, stat, pwr)
         if task == "classification" and "pred_a" in df.columns:
             _page_per_class_agreement(pdf, df)
@@ -126,7 +163,8 @@ def generate_ab_report(
         _page_kde_violin(pdf, df, model_a_name, model_b_name)
         _page_entropy_disagreement(pdf, df, model_a_name, model_b_name)
         _page_calibration_analysis(pdf, df, model_a_name)
-        _page_summary_table(pdf, df, stat, pwr, delta, dr, model_a_name, model_b_name, alpha)
+        _page_summary_table(pdf, df, stat, pwr, delta, dr, model_a_name, model_b_name, alpha,
+                            verdict)
         # Only emit uncertainty decomposition page if BALD columns exist
         if {"bald_epistemic", "bald_aleatoric"}.issubset(df.columns):
             _page_uncertainty_decomposition(pdf, df)
@@ -151,6 +189,10 @@ _RED    = "#F44336"
 _ORANGE = "#FF9800"
 _GREY   = "#607D8B"
 _DARK   = "#212121"
+# Agreement and disagreement: neutral colours, since agreement says nothing about which
+# model is right.
+_AGREE    = "#90A4AE"
+_DISAGREE = "#3F51B5"
 
 
 def _header(fig, title: str, subtitle: str = "") -> None:
@@ -169,9 +211,24 @@ def _footer(fig) -> None:
              ha="center", va="bottom", fontsize=7, color=_GREY)
 
 
-# ── Page 1: Cover ──────────────────────────────────────────────────────────
+# ── Page: Cover ──────────────────────────────────────────────────────────
 
-def _page_cover(pdf, df, stat, pwr, dr, name_a, name_b, task, alpha):
+def _verdict_lines(verdict: Optional[Dict[str, Any]]) -> List[str]:
+    """The gate's decision, its conclusion and the criteria it failed, for the cover."""
+    if verdict is None:
+        return ["Not computed: run ab_testing.promotion.decide_promotion and pass verdict="]
+    reasons = verdict.get("reasons", [])
+    # On invalid input the gate marks the other criteria "not evaluated", not failed.
+    skipped = [r for r in reasons if str(r.get("detail", "")).startswith("not evaluated")]
+    failing = [r["criterion"] for r in reasons if not r.get("passed") and r not in skipped]
+    lines = [f"{verdict['decision']}   ({verdict.get('conclusion')})"]
+    if failing:
+        lines.append("failing: " + ", ".join(failing)
+                     + (f"   (the other {len(skipped)} not evaluated)" if skipped else ""))
+    return lines
+
+
+def _page_cover(pdf, df, stat, pwr, dr, name_a, name_b, task, alpha, verdict, issues, pc):
     fig = plt.figure(figsize=(8.27, 11.69))   # A4
     _footer(fig)
 
@@ -189,31 +246,40 @@ def _page_cover(pdf, df, stat, pwr, dr, name_a, name_b, task, alpha):
     fig.add_artist(plt.Line2D([0.08, 0.92], [0.745, 0.745],
                                transform=fig.transFigure, color=_GREY, lw=0.8))
 
-    # Compute accuracy if label + predictions available
-    acc_a = acc_b = None
-    if {"label", "pred_a", "pred_b"}.issubset(df.columns):
-        acc_a = float((df["pred_a"] == df["label"]).mean())
-        acc_b = float((df["pred_b"] == df["label"]).mean())
+    # Accuracies on the slice, from the counts the gate reads (n/a when they are invalid),
+    # and the difference the gate judged: its estimand (at the deployment prior, by
+    # default) when a verdict has one, else the slice's own difference.
+    acc_a = acc_b = slice_delta = None
+    if pc["valid"]:
+        n = pc["n"]
+        acc_a = (pc["both_correct"] + pc["only_a_correct"]) / n
+        acc_b = (pc["both_correct"] + pc["only_b_correct"]) / n
+        slice_delta = (pc["only_b_correct"] - pc["only_a_correct"]) / n
+    estimates = (verdict or {}).get("estimates") or {}
+    if estimates:                 # a verdict on a valid slice: the difference the gate judged
+        delta_label = f"Δ (B − A), {str(estimates.get('estimand')).replace('_', ' ')}"
+        if estimates.get("estimand_delta") is None:     # a weighted class is absent
+            delta_value = "n/a (not estimable)"
+        else:
+            delta_value = (f"{estimates['estimand_delta']:+.1%}  "
+                           f"(lower {estimates['estimand_lower']:+.1%})")
+    else:
+        delta_label = "Δ (B − A), slice"
+        delta_value = f"{slice_delta:+.1%}" if slice_delta is not None else "n/a"
 
-    # Key metrics grid (3 × 3)
+    # Key numbers (3 x 3). Neutral colours: none of them decides promotion.
+    test_name, test_value = statistic_label(stat).split(" = ")
     metrics = [
-        ("Accuracy A",          f"{acc_a:.1%}" if acc_a is not None else "n/a",
-         _GREEN if acc_a and acc_a >= 0.80 else _ORANGE if acc_a else _GREY),
-        ("Accuracy B",          f"{acc_b:.1%}" if acc_b is not None else "n/a",
-         _GREEN if acc_b and acc_b >= 0.80 else _ORANGE if acc_b else _GREY),
-        ("Accuracy Δ (A-B)",    f"{acc_a - acc_b:+.1%}" if acc_a is not None else "n/a",
-         _GREEN if acc_a and acc_a > acc_b else _RED if acc_a else _GREY),
-        ("Disagreement Rate",   f"{dr:.1%}",
-         _RED if dr > 0.15 else _ORANGE if dr > 0.05 else _GREEN),
-        ("p-value (Welch t)",   _fmt_pvalue(stat['p_value']),
-         _RED if stat["significant"] else _GREEN),
-        ("Cohen's d",           f"{stat['cohens_d']:.3f}  ({stat['effect_magnitude']})",
-         _ORANGE),
-        ("Statistical Result",  "SIGNIFICANT" if stat["significant"] else "NOT SIGNIFICANT",
-         _RED if stat["significant"] else _GREEN),
-        ("Achieved Power",      f"{pwr['achieved_power']:.1%}",
-         _GREEN if pwr["adequately_powered"] else _ORANGE),
-        ("Mean Conf. Δ",        f"{df['confidence_delta'].mean():.4f}", _BLUE),
+        ("Accuracy A (slice)",      f"{acc_a:.1%}" if acc_a is not None else "n/a", _BLUE),
+        ("Accuracy B (slice)",      f"{acc_b:.1%}" if acc_b is not None else "n/a", _BLUE),
+        (delta_label,               delta_value, _BLUE),
+        ("Disagreement rate",       f"{dr:.1%}", _GREY),
+        ("Confidence test p",       _fmt_pvalue(stat["p_value"]), _GREY),
+        (f"{test_name} (confidence)", test_value, _GREY),
+        ("Cohen's d (confidence)",  f"{stat['cohens_d']:.3f}  ({stat['effect_magnitude']})",
+         _GREY),
+        ("Post hoc power",          f"{pwr['achieved_power']:.1%}", _GREY),
+        ("Mean confidence Δ",       f"{df['confidence_delta'].mean():.4f}", _GREY),
     ]
 
     cols, rows = 3, 3
@@ -236,13 +302,17 @@ def _page_cover(pdf, df, stat, pwr, dr, name_a, name_b, task, alpha):
         ax.text(0.5, 0.28, value, ha="center", va="center",
                 fontsize=11, color="white", transform=ax.transAxes)
 
-    # Data quality warnings (P12 + P13)
-    warnings = []
+    # Data quality warnings
+    warnings = list(issues)
+    if not pc["valid"]:
+        more = f" (+{len(pc['errors']) - 1} more)" if len(pc["errors"]) > 1 else ""
+        warnings.append("Paired counts invalid: "
+                        + textwrap.shorten(pc["errors"][0], width=70, placeholder=" ...") + more)
     if stat["std_a"] < 0.01 or stat["std_b"] < 0.01:
         warnings.append(
             f"Low variance detected (std_A={stat['std_a']:.4f}, "
             f"std_B={stat['std_b']:.4f}). "
-            "t-stat and Cohen's d may be inflated.")
+            "The confidence statistic and Cohen's d may be inflated.")
     if pwr["required_n_for_80pct"] <= 5:
         warnings.append(
             f"Required n for 80% power = {pwr['required_n_for_80pct']} "
@@ -267,9 +337,10 @@ def _page_cover(pdf, df, stat, pwr, dr, name_a, name_b, task, alpha):
 
     # Reference note
     fig.text(0.5, warn_y - 0.02,
-             "Statistical framework: Quin & Weyns (2023) AutoPABS\n"
-             "Welch's t-test (unequal variance) + Cohen's d effect size\n"
-             "Power analysis: n_required = 2*(z_a/2 + z_b)^2 * sigma^2 / delta^2",
+             "Decision: the promotion gate (ab_testing.promotion), on paired correctness:\n"
+             "exact one-sided McNemar test and Tango score bounds.\n"
+             "Diagnostics: Welch's t or Mann-Whitney U on the confidences, Cohen's d, "
+             "post hoc power (Quin & Weyns 2023)",
              ha="center", fontsize=8, color=_GREY, linespacing=1.8,
              style="italic")
 
@@ -281,43 +352,117 @@ def _page_cover(pdf, df, stat, pwr, dr, name_a, name_b, task, alpha):
     fig.text(0.5, 0.16, f"B (challenger): {name_b}",
              ha="center", fontsize=9, color=_DARK)
 
-    # The promotion decision belongs to the gate (ab_testing.promotion), which reads
-    # paired correctness; agreement between A and B says nothing about which is right.
-    ax_v = fig.add_axes([0.08, 0.05, 0.84, 0.07])
-    ax_v.set_facecolor(_GREY)
+    # The verdict is the gate's alone: agreement or a confidence test says nothing about
+    # which model is right.
+    if verdict is None:
+        colour = _GREY
+    else:
+        colour = _GREEN if verdict["decision"] == "promote_B" else _RED
+    ax_v = fig.add_axes([0.08, 0.04, 0.84, 0.09])
+    ax_v.set_facecolor(colour)
     ax_v.set_xlim(0, 1); ax_v.set_ylim(0, 1)
     ax_v.set_xticks([]); ax_v.set_yticks([])
     for spine in ax_v.spines.values():
         spine.set_visible(False)
-    ax_v.text(0.5, 0.55, "Promotion verdict", ha="center", va="center",
+    ax_v.text(0.5, 0.78, "Promotion verdict", ha="center", va="center",
               fontsize=8, color="white", transform=ax_v.transAxes)
-    ax_v.text(0.5, 0.20, "Not computed in this report: see ab_testing.promotion.decide_promotion",
-              ha="center", va="center", fontsize=10, fontweight="bold", color="white",
-              transform=ax_v.transAxes)
+    for i, line in enumerate(_verdict_lines(verdict)):
+        ax_v.text(0.5, 0.48 - 0.28 * i, line, ha="center", va="center",
+                  fontsize=10 if i == 0 else 8, fontweight="bold" if i == 0 else "normal",
+                  color="white", transform=ax_v.transAxes)
 
     pdf.savefig(fig, bbox_inches="tight")
     plt.close(fig)
 
 
-# ── Page 2: Statistical significance ───────────────────────────────────────
+# ── Page: Promotion gate ──────────────────────────────────────────────────
+
+def _page_gate(pdf, verdict, name_a, name_b):
+    """Every criterion of the gate, the per-class bounds and the false-alarm vetoes."""
+    fig = plt.figure(figsize=(8.27, 11.69))
+    thresholds = verdict.get("thresholds") or {}
+    _header(fig, "Promotion Gate",
+            f"decide_promotion  •  {name_b} replaces {name_a} only if every criterion passes"
+            f"  •  α = {thresholds.get('alpha')}")
+    _footer(fig)
+    ax = fig.add_axes([0.06, 0.06, 0.88, 0.84])
+    ax.axis("off")
+
+    y = 0.98
+    ax.text(0.0, y, f"Decision: {verdict['decision']}   •   conclusion: "
+                    f"{verdict.get('conclusion')}",
+            fontsize=11, fontweight="bold",
+            color=_GREEN if verdict["decision"] == "promote_B" else _RED,
+            transform=ax.transAxes)
+    y -= 0.045
+    for r in verdict.get("reasons", []):
+        mark = "PASS" if r.get("passed") else "FAIL"
+        ax.text(0.0, y, f"{mark}  {r['criterion']}", fontsize=8.5, fontweight="bold",
+                color=_GREEN if r.get("passed") else _RED, transform=ax.transAxes)
+        for line in textwrap.wrap(str(r.get("detail", "")), width=110, max_lines=4,
+                                  placeholder=" [...]"):
+            y -= 0.022
+            ax.text(0.03, y, line, fontsize=7.5, color=_DARK, transform=ax.transAxes)
+        y -= 0.03
+
+    per_class = verdict.get("per_class") or []
+    if per_class:
+        y -= 0.01
+        ax.text(0.0, y, "Per class (recall of B minus recall of A)", fontsize=9.5,
+                fontweight="bold", color=_BLUE, transform=ax.transAxes)
+        y -= 0.028
+        header = ["class", "n", "Δ (B−A)", "lower", "−margin", "status"]
+        xs = [0.0, 0.27, 0.37, 0.49, 0.61, 0.73]
+        for x, h in zip(xs, header):
+            ax.text(x, y, h, fontsize=8, fontweight="bold", color=_GREY, transform=ax.transAxes)
+        for row in per_class[:24]:
+            y -= 0.021
+            name = row.get("name") if row.get("name") is not None else row.get("class")
+            cells = [str(name), str(row.get("n")),
+                     "–" if row.get("delta") is None else f"{row['delta']:+.3f}",
+                     "–" if row.get("lower") is None else f"{row['lower']:+.3f}",
+                     f"{-row['margin']:+.3f}", str(row.get("status"))]
+            ok = row.get("status") == "pass"
+            for x, c in zip(xs, cells):
+                ax.text(x, y, c, fontsize=7.5, color=_DARK if ok else _RED,
+                        transform=ax.transAxes)
+        y -= 0.035
+
+    vetoes = [r for r in (verdict.get("per_predicted_class") or []) if r.get("status") == "veto"]
+    lines = [f"false-alarm veto on {r.get('name') or r.get('class')}: lower bound of B's "
+             f"increase {r['fa_lower']:+.4f} > margin {r['fa_margin']}" for r in vetoes]
+    lines += [f"warning: {w}" for w in verdict.get("warnings", [])]
+    for text in lines:
+        for line in textwrap.wrap(text, width=110, max_lines=3, placeholder=" [...]"):
+            ax.text(0.0, y, line, fontsize=7.5, color=_ORANGE, transform=ax.transAxes)
+            y -= 0.021
+        y -= 0.006
+
+    pdf.savefig(fig, bbox_inches="tight")
+    plt.close(fig)
+
+
+# ── Page: Diagnostics on the confidences ─────────────────────────────────
 
 def _page_statistics(pdf, stat, pwr, delta, name_a, name_b, alpha):
     fig = plt.figure(figsize=(8.27, 11.69))
-    _header(fig, "Statistical Significance Analysis",
-            "Quin & Weyns (2023) — Welch's t-test + Cohen's d + Power Analysis")
+    _header(fig, "Diagnostics on the Confidences",
+            "Quin & Weyns (2023): a test on the confidences, Cohen's d, post hoc power. "
+            "They do not decide promotion.")
     _footer(fig)
 
     ax = fig.add_axes([0.08, 0.15, 0.84, 0.72])
     ax.axis("off")
 
     sections = [
-        ("Hypothesis Test (Welch's t-test, unequal variance)", [
-            ("H0", "mu_A = mu_B  (no difference between models)"),
-            ("H1", "mu_A != mu_B  (two-tailed)"),
-            ("t-statistic",      f"{stat['t_stat']:.4f}"),
-            ("p-value",          f"{_fmt_pvalue(stat['p_value'])}  ->  {'REJECT H0' if stat['significant'] else 'FAIL TO REJECT H0'}"),
-            ("Significance",     f"alpha = {alpha}  ->  {'SIGNIFICANT' if stat['significant'] else 'NOT SIGNIFICANT'}"),
-            ("95% CI (A - B)",   f"({stat['confidence_interval_95'][0]:.4f},  {stat['confidence_interval_95'][1]:.4f})"),
+        ("Test on the confidences (Welch's t if both look normal, else Mann-Whitney U)", [
+            ("H0", "mean confidence of A = mean confidence of B  (two-tailed)"
+                   if stat.get("test_used") == "welch_t" else
+                   "P(conf_A > conf_B) = 1/2  (two-tailed)"),
+            ("Statistic",        statistic_label(stat)),
+            ("p-value",          f"{_fmt_pvalue(stat['p_value'])}  ->  {'REJECT H0' if stat['significant'] else 'FAIL TO REJECT H0'}  (alpha = {alpha})"),
+            ("95% CI (A - B)",   f"({stat['confidence_interval_95'][0]:.4f},  {stat['confidence_interval_95'][1]:.4f})"
+                                 if stat.get("test_used") == "welch_t" else "n/a (Welch only)"),
         ]),
         ("Effect Size - Cohen's d", [
             ("Formula",          "d = (mu_A - mu_B) / sigma_pooled"),
@@ -330,7 +475,7 @@ def _page_statistics(pdf, stat, pwr, delta, name_a, name_b, alpha):
         ("Power Analysis", [
             ("Observed effect",  f"{pwr['observed_effect']:.4f}"),
             ("Pooled sigma",     f"{pwr['sigma']:.4f}"),
-            ("Achieved power",   f"{pwr['achieved_power']:.1%}  ({'adequate [OK]' if pwr['adequately_powered'] else 'insufficient [!!]'})"),
+            ("Post hoc power",   f"{pwr['achieved_power']:.1%}  (at the observed effect: not a plan)"),
             ("Required n (80% pwr)",f"{pwr['required_n_for_80pct']} per group"
              + ("  (very large effect — statistical minimum, not operational)" if pwr['required_n_for_80pct'] < 30 else "")),
             ("Current n",           f"{pwr['n']} per group"),
@@ -363,90 +508,62 @@ def _page_statistics(pdf, stat, pwr, delta, name_a, name_b, alpha):
     plt.close(fig)
 
 
-# ── Page 3: Disagreement bar ────────────────────────────────────────────────
+# ── Page: McNemar's Paired Classifier Test (McNemar 1947) ───────────────
 
-def _page_disagreement_bar(pdf, df, stat, name_a, name_b):
-    fig, ax = plt.subplots(figsize=(8.27, 5))
-    fig.subplots_adjust(top=0.82, bottom=0.18)
-    _footer(fig)
+def _page_mcnemar(pdf, pc, name_a, name_b, alpha=0.05):
+    """McNemar's test on the paired counts (a diagnostic).
 
-    agree    = int(df["agrees"].sum())
-    disagree = len(df) - agree
-    bars = ax.bar(["Agree", "Disagree"], [agree, disagree],
-                  color=[_GREEN, _RED], width=0.5, edgecolor="white", linewidth=1.5)
-    for bar, count in zip(bars, [agree, disagree]):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + len(df) * 0.01,
-                f"{count}\n({count/len(df):.1%})", ha="center", va="bottom", fontsize=11)
-
-    p_str  = f"p = {_fmt_pvalue(stat['p_value'])}"
-    d_str  = f"d = {stat['cohens_d']:.3f}  ({stat['effect_magnitude']})"
-    sig_str = "[OK] Significant" if stat["significant"] else "[--] Not significant"
-    ax.set_title(f"Agreement vs Disagreement - {name_a} vs {name_b}\n"
-                 f"{p_str}   {d_str}   {sig_str}", fontsize=10)
-    ax.set_ylabel("Number of images")
-    ax.set_ylim(0, max(agree, disagree) * 1.2)
-    ax.grid(axis="y", alpha=0.3)
-
-    pdf.savefig(fig, bbox_inches="tight")
-    plt.close(fig)
-
-
-# ── Page 3b: McNemar's Paired Classifier Test (McNemar 1947) ──────────────
-
-def _page_mcnemar(pdf, df, name_a, name_b):
-    """Full-page McNemar's test: 2×2 contingency + statistical results."""
+    Reads the counts that paired.paired_counts validated, the gate's input, and tests them
+    with paired.mcnemar_two_sided, as compute_all_metrics does: the report and the cascade
+    show the same numbers, and neither shows any on a slice that breaks the contract (no
+    labels, a repeated or missing image id, an 'arm' column); the page lists why instead.
+    """
     fig = plt.figure(figsize=(8.27, 11.69))
     _header(fig, "McNemar's Paired Classifier Test (McNemar 1947)",
             r"H$_0$: both models have the same error rate  ·  "
-            r"Uses only discordant pairs (n$_{01}$ vs n$_{10}$)")
+            r"Uses only discordant pairs (n$_{10}$ vs n$_{01}$)")
     _footer(fig)
 
-    required = {"pred_a", "pred_b", "label"}
-    if not required.issubset(df.columns):
+    if not pc["valid"]:
         ax = fig.add_subplot(111)
         ax.text(0.5, 0.5,
-                "McNemar's test requires columns:\npred_a, pred_b, label\n"
-                "(ground-truth labels needed)",
-                ha="center", va="center", fontsize=13, color=_GREY,
+                "No McNemar test: the slice is not a valid paired evaluation\n"
+                "(paired.paired_counts, the gate's input)\n\n"
+                + "\n".join(textwrap.shorten(e, width=90, placeholder=" ...")
+                            for e in pc["errors"][:4]),
+                ha="center", va="center", fontsize=10, color=_GREY,
                 transform=ax.transAxes)
         ax.axis("off")
         pdf.savefig(fig, bbox_inches="tight")
         plt.close(fig)
         return
 
-    a_correct = (df["pred_a"] == df["label"]).values
-    b_correct = (df["pred_b"] == df["label"]).values
-    n00 = int((a_correct & b_correct).sum())
-    n01 = int((a_correct & ~b_correct).sum())
-    n10 = int((~a_correct & b_correct).sum())
-    n11 = int((~a_correct & ~b_correct).sum())
-    n_total = len(df)
-    discordant = n01 + n10
+    # paired.py's names: n11 both right, n10 only A right, n01 only B right, n00 both wrong.
+    n11, n10 = pc["both_correct"], pc["only_a_correct"]
+    n01, n00 = pc["only_b_correct"], pc["both_wrong"]
+    n_total = pc["n"]
+    discordant = n10 + n01
 
-    if discordant >= 25:
-        chi2 = (abs(n01 - n10) - 1) ** 2 / discordant
-        p_value = 1.0 - scipy_stats.chi2.cdf(chi2, df=1)
-        test_type = "χ² with continuity correction"
-    elif discordant > 0:
-        p_value = float(scipy_stats.binomtest(n01, discordant, 0.5).pvalue)
-        chi2 = float("nan")
-        test_type = "Exact binomial test (discordant < 25)"
-    else:
-        chi2, p_value = 0.0, 1.0
-        test_type = "No discordant pairs"
+    result = mcnemar_two_sided(n10, n01)
+    p_value = result["p_value"]
+    chi2 = result["statistic"] if result["test_used"] == "mcnemar_yates" else float("nan")
+    test_type = {"mcnemar_yates": "χ² with continuity correction",
+                 "mcnemar_exact": "Exact binomial test (discordant < 25)",
+                 "mcnemar_degenerate": "No discordant pairs"}[result["test_used"]]
 
     # 2×2 heatmap
     ax_hm = fig.add_axes([0.15, 0.48, 0.35, 0.30])
-    table = np.array([[n00, n01], [n10, n11]])
+    table = np.array([[n11, n10], [n01, n00]])      # rows: A right / wrong; columns: B
     im = ax_hm.imshow(table, cmap="RdYlGn", vmin=0, vmax=max(n_total // 2, 1))
     ax_hm.set_xticks([0, 1])
     ax_hm.set_xticklabels([f"{name_b}\ncorrect", f"{name_b}\nwrong"], fontsize=9)
     ax_hm.set_yticks([0, 1])
     ax_hm.set_yticklabels([f"{name_a}\ncorrect", f"{name_a}\nwrong"], fontsize=9)
+    cell_names = [["n11", "n10"], ["n01", "n00"]]
     for i in range(2):
         for j in range(2):
             pct = table[i, j] / max(n_total, 1) * 100
-            ax_hm.text(j, i, f"{table[i, j]}\n({pct:.1f}%)",
+            ax_hm.text(j, i, f"{cell_names[i][j]}\n{table[i, j]}\n({pct:.1f}%)",
                        ha="center", va="center", fontsize=12, fontweight="bold",
                        color="white" if table[i, j] > n_total * 0.3 else "black")
     ax_hm.set_title("Contingency Table", fontsize=10)
@@ -454,19 +571,25 @@ def _page_mcnemar(pdf, df, name_a, name_b):
     # Statistical results text
     ax_txt = fig.add_axes([0.55, 0.48, 0.40, 0.30])
     ax_txt.axis("off")
-    verdict = "SIGNIFICANT — models differ" if p_value < 0.05 else "NOT SIGNIFICANT"
-    vc = _RED if p_value < 0.05 else _GREEN
+    if result["test_used"] == "mcnemar_degenerate":
+        verdict = "No discordant pairs: no test"
+    else:
+        verdict = (f"Two-sided p {'<' if p_value < alpha else '>='} {alpha}: "
+                   f"{'the error rates differ' if p_value < alpha else 'no difference detected'}")
+    vc = _GREY
 
     lines = [
         f"Test type:  {test_type}",
-        f"χ² statistic:  {chi2:.4f}" if np.isfinite(chi2) else "Exact binomial used",
+        {"mcnemar_yates": f"χ² statistic:  {chi2:.4f}",
+         "mcnemar_exact": "Exact binomial used",
+         "mcnemar_degenerate": "No test: no discordant pairs"}[result["test_used"]],
         f"p-value:  {_fmt_pvalue(p_value)}",
         "",
-        f"Discordant:  {discordant}  (n_01={n01}, n_10={n10})",
-        f"Concordant:  {n00 + n11}  (both right={n00}, both wrong={n11})",
+        f"Discordant:  {discordant}  (n10 = {n10}, n01 = {n01})",
+        f"Concordant:  {n11 + n00}  (n11 = {n11}, n00 = {n00})",
         "",
-        f"Accuracy A:  {(n00 + n01) / max(n_total, 1):.1%}",
-        f"Accuracy B:  {(n00 + n10) / max(n_total, 1):.1%}",
+        f"Accuracy A:  {(n11 + n10) / max(n_total, 1):.1%}",
+        f"Accuracy B:  {(n11 + n01) / max(n_total, 1):.1%}",
     ]
     y = 0.95
     for line in lines:
@@ -474,26 +597,28 @@ def _page_mcnemar(pdf, df, name_a, name_b):
                     transform=ax_txt.transAxes)
         y -= 0.10
 
-    # Verdict banner
+    # Result banner: the test's outcome, then whose call promotion is
     ax_v = fig.add_axes([0.10, 0.38, 0.80, 0.06])
     ax_v.set_facecolor(vc)
     ax_v.set_xlim(0, 1); ax_v.set_ylim(0, 1)
     ax_v.set_xticks([]); ax_v.set_yticks([])
     for s in ax_v.spines.values():
         s.set_visible(False)
-    ax_v.text(0.5, 0.5, verdict, ha="center", va="center",
-              fontsize=12, fontweight="bold", color="white",
+    ax_v.text(0.5, 0.64, verdict, ha="center", va="center",
+              fontsize=11, fontweight="bold", color="white",
               transform=ax_v.transAxes)
+    ax_v.text(0.5, 0.26, "A diagnostic: the promotion gate decides.", ha="center",
+              va="center", fontsize=8.5, color="white", transform=ax_v.transAxes)
 
-    # Theory note
-    fig.text(0.5, 0.28,
+    # Theory note, below the banner (top-aligned: it used to grow up behind it)
+    fig.text(0.5, 0.35,
              "McNemar (1947): Tests whether the marginal proportions of errors differ\n"
              "between two classifiers evaluated on the same test set.\n\n"
-             r"$\chi^2$ = (|n$_{01}$ - n$_{10}$| - 1)$^2$ / (n$_{01}$ + n$_{10}$)   with 1 df" + "\n"
-             r"If n$_{01}$ + n$_{10}$ < 25, exact binomial test is used instead." + "\n\n"
+             r"$\chi^2$ = (|n$_{10}$ - n$_{01}$| - 1)$^2$ / (n$_{10}$ + n$_{01}$)   with 1 df" + "\n"
+             r"If n$_{10}$ + n$_{01}$ < 25, exact binomial test is used instead." + "\n\n"
              "Key insight: Only DISCORDANT pairs matter — concordant pairs\n"
              "(both right or both wrong) are ignored.",
-             ha="center", fontsize=9, color=_GREY, linespacing=1.6, style="italic")
+             ha="center", va="top", fontsize=9, color=_GREY, linespacing=1.6, style="italic")
 
     pdf.savefig(fig, bbox_inches="tight")
     plt.close(fig)
@@ -506,7 +631,7 @@ def _page_per_class_delta(pdf, df, name_a, name_b):
     fig = plt.figure(figsize=(8.27, 11.69))
     _header(fig, "Per-class Accuracy Delta",
             f"acc({name_b}) − acc({name_a}) per class  ·  "
-            "Green = B improved  ·  Red = B degraded")
+            "green: Δ ≥ 0  ·  red: Δ < 0  (point estimates)")
     _footer(fig)
 
     required = {"pred_a", "pred_b", "label"}
@@ -546,8 +671,7 @@ def _page_per_class_delta(pdf, df, name_a, name_b):
     x_range = max(abs(x_min), abs(x_max), 0.05)
 
     for i, (d, a_a, a_b, n_c) in enumerate(zip(deltas, acc_a_list, acc_b_list, counts)):
-        tag = "DEGRADED " if d < -0.05 else ("IMPROVED " if d > 0.05 else "")
-        label = f"{tag}A:{a_a:.0%}\u2192B:{a_b:.0%} (n={n_c})"
+        label = f"A:{a_a:.0%}\u2192B:{a_b:.0%} (n={n_c})"
         # If bar is long (>60% of axis range), place label inside the bar
         bar_fraction = abs(d) / x_range if x_range > 0 else 0
         if bar_fraction > 0.6 and abs(d) > 0.08:
@@ -557,7 +681,7 @@ def _page_per_class_delta(pdf, df, name_a, name_b):
         else:
             x_pos = d + (0.005 if d >= 0 else -0.005)
             ha = "left" if d >= 0 else "right"
-            txt_color = "#C62828" if d < -0.05 else _DARK
+            txt_color = _DARK
         ax.text(x_pos, i, label, ha=ha, va="center", fontsize=7,
                 color=txt_color, fontweight="bold" if txt_color == "white" else "normal")
 
@@ -574,17 +698,16 @@ def _page_per_class_delta(pdf, df, name_a, name_b):
 
     # Summary
     n_degraded = sum(1 for d in deltas if d < -0.05)
-    summary_color = _RED if n_degraded > 0 else _GREEN
     fig.text(0.5, 0.06,
-             f"Classes with Δ < −5%: {n_degraded} / {len(classes)}  "
-             f"{'— REVIEW BEFORE DEPLOYMENT' if n_degraded > 0 else '— ALL CLASSES STABLE'}",
-             ha="center", fontsize=10, fontweight="bold", color=summary_color)
+             f"Classes with a point estimate Δ < −5%: {n_degraded} / {len(classes)}.  "
+             "The gate's no_class_regression clause decides, on lower bounds.",
+             ha="center", fontsize=9, color=_GREY)
 
     pdf.savefig(fig, bbox_inches="tight")
     plt.close(fig)
 
 
-# ── Page 4: Confidence delta distribution ──────────────────────────────────
+# ── Page: Confidence delta distribution ──────────────────────────────────
 
 def _page_confidence_delta(pdf, df, stat, pwr):
     fig, ax = plt.subplots(figsize=(8.27, 5))
@@ -600,7 +723,7 @@ def _page_confidence_delta(pdf, df, stat, pwr):
     p_str = f"p = {stat['p_value']:.4f}" if stat["p_value"] >= 0.0001 else "p < 0.0001"
     artifact_note = "  ⚠ synth. artifact" if stat["cohens_d"] > 3.0 else ""
     box_text = (
-        f"Welch  t = {stat['t_stat']:.2f}\n"
+        f"{statistic_label(stat)}\n"
         f"{p_str}\n"
         f"Cohen's d = {stat['cohens_d']:.3f}  ({stat['effect_magnitude']}){artifact_note}\n"
         f"Power = {pwr['achieved_power']:.1%}   n = {pwr['n']}"
@@ -619,7 +742,7 @@ def _page_confidence_delta(pdf, df, stat, pwr):
     plt.close(fig)
 
 
-# ── Page 5: Per-class agreement ────────────────────────────────────────────
+# ── Page: Per-class agreement ────────────────────────────────────────────
 
 def _page_per_class_agreement(pdf, df):
     stats = per_class_agreement(df)
@@ -627,11 +750,9 @@ def _page_per_class_agreement(pdf, df):
     fig.subplots_adjust(top=0.85, bottom=0.15)
     _footer(fig)
 
-    colors = [_GREEN if r >= 0.8 else _ORANGE if r >= 0.5 else _RED
-              for r in stats["agreement_rate"]]
+    # One colour and no cut-off: agreement says nothing about which model is right.
     ax.bar(stats["class_id"].astype(str), stats["agreement_rate"],
-           color=colors, edgecolor="white", linewidth=1.2)
-    ax.axhline(0.8, color=_GREEN, linestyle="--", alpha=0.6, label="80% threshold")
+           color=_BLUE, edgecolor="white", linewidth=1.2)
 
     for i, (r, n) in enumerate(zip(stats["agreement_rate"], stats["count"])):
         ax.text(i, r + 0.02, f"n={n}", ha="center", fontsize=8, color=_DARK)
@@ -640,14 +761,13 @@ def _page_per_class_agreement(pdf, df):
     ax.set_xlabel("Class ID (predicted by Model A)")
     ax.set_ylabel("Agreement rate")
     ax.set_title("Per-class Agreement Rate (A vs B)", fontsize=10)
-    ax.legend(fontsize=9)
     ax.grid(axis="y", alpha=0.3)
 
     pdf.savefig(fig, bbox_inches="tight")
     plt.close(fig)
 
 
-# ── Page 6: IoU (segmentation) ─────────────────────────────────────────────
+# ── Page: IoU (segmentation) ─────────────────────────────────────────────
 
 def _page_iou(pdf, df):
     fig, axes = plt.subplots(1, 2, figsize=(8.27, 5))
@@ -682,7 +802,7 @@ def _page_iou(pdf, df):
     plt.close(fig)
 
 
-# ── Page 7: Confidence scatter ─────────────────────────────────────────────
+# ── Page: Confidence scatter ─────────────────────────────────────────────
 
 def _page_confidence_scatter(pdf, df, stat, name_a, name_b):
     fig, axes = plt.subplots(1, 2, figsize=(8.27, 5))
@@ -693,10 +813,10 @@ def _page_confidence_scatter(pdf, df, stat, name_a, name_b):
     agree_mask = df["agrees"] == 1
     axes[0].scatter(df.loc[agree_mask, "confidence_a"],
                     df.loc[agree_mask, "confidence_b"],
-                    alpha=0.3, s=8, color=_GREEN, label="Agree")
+                    alpha=0.3, s=8, color=_AGREE, label="Agree")
     axes[0].scatter(df.loc[~agree_mask, "confidence_a"],
                     df.loc[~agree_mask, "confidence_b"],
-                    alpha=0.5, s=8, color=_RED, label="Disagree")
+                    alpha=0.5, s=8, color=_DISAGREE, label="Disagree")
     # Auto-zoom to data range with 5% padding so points aren't all in one corner
     ca_all = df["confidence_a"].values
     cb_all = df["confidence_b"].values
@@ -735,9 +855,9 @@ def _page_confidence_scatter(pdf, df, stat, name_a, name_b):
     plt.close(fig)
 
 
-# ── Page 8: Summary table ──────────────────────────────────────────────────
+# ── Page: Summary table ──────────────────────────────────────────────────
 
-def _page_summary_table(pdf, df, stat, pwr, delta, dr, name_a, name_b, alpha):
+def _page_summary_table(pdf, df, stat, pwr, delta, dr, name_a, name_b, alpha, verdict=None):
     fig = plt.figure(figsize=(8.27, 11.69))
     _header(fig, "Complete Metrics Summary",
             f"{name_a}  vs  {name_b}   •   n = {len(df)} images   •   α = {alpha}")
@@ -746,32 +866,36 @@ def _page_summary_table(pdf, df, stat, pwr, delta, dr, name_a, name_b, alpha):
     ax = fig.add_axes([0.05, 0.10, 0.90, 0.78])
     ax.axis("off")
 
-    rows = [
-        # Section, Key, Value, Interpretation
+    test_name = "Mann-Whitney U" if stat.get("test_used") == "mann_whitney_u" else "Welch t-test"
+    gate = ([["Promotion gate", "Decision", verdict["decision"], str(verdict.get("conclusion"))]]
+            if verdict is not None else
+            [["Promotion gate", "Decision", "not computed", "decide_promotion"]])
+    rows = gate + [
+        # Section, Key, Value, Note (diagnostics: none of these decides promotion)
         ["Overview",       "Total images",           str(len(df)),             ""],
         ["",               "Task",                   df.get("task", ["classification"])[0]
                                                       if hasattr(df, "get") else "classification", ""],
         ["",               "Model A",                name_a,                    ""],
         ["",               "Model B",                name_b,                    ""],
-        ["Agreement",      "Disagreement rate",      f"{dr:.2%}",
-         "[+] good" if dr < 0.05 else "[!] moderate" if dr < 0.15 else "[-] high"],
+        ["Agreement",      "Disagreement rate",      f"{dr:.2%}",              ""],
         ["",               "Agreement rate",         f"{1-dr:.2%}",            ""],
-        ["Welch t-test",   "t-statistic",            f"{stat['t_stat']:.4f}",  ""],
-        ["",               "p-value",                _fmt_pvalue(stat['p_value']),
-         "[-] significant" if stat["significant"] else "[+] not significant"],
+        [test_name,        "Statistic",              statistic_label(stat).split(" = ")[-1],
+         "on the confidences"],
+        ["",               "p-value",                _fmt_pvalue(stat['p_value']), ""],
         ["",               "Result",
          "REJECT H0" if stat["significant"] else "FAIL TO REJECT H0",
          f"alpha = {alpha}"],
         ["",               "95% CI (A-B)",
-         f"({stat['confidence_interval_95'][0]:.4f}, {stat['confidence_interval_95'][1]:.4f})", ""],
+         f"({stat['confidence_interval_95'][0]:.4f}, {stat['confidence_interval_95'][1]:.4f})"
+         if stat.get("test_used") == "welch_t" else "n/a (Welch only)", ""],
         ["Effect Size",    "Cohen's d",              f"{stat['cohens_d']:.4f}",
          stat["effect_magnitude"]],
         ["",               "Mean A",                 f"{stat['mean_a']:.4f}",  ""],
         ["",               "Std A",                  f"{stat['std_a']:.4f}",   ""],
         ["",               "Mean B",                 f"{stat['mean_b']:.4f}",  ""],
         ["",               "Std B",                  f"{stat['std_b']:.4f}",   ""],
-        ["Power",          "Achieved power",         f"{pwr['achieved_power']:.1%}",
-         "[+] adequate" if pwr["adequately_powered"] else "[!] insufficient"],
+        ["Power",          "Post hoc power",         f"{pwr['achieved_power']:.1%}",
+         "at the observed effect"],
         ["",               "Required n (80% power)", str(pwr["required_n_for_80pct"]), "per group"],
         ["",               "Observed effect Δ",      f"{pwr['observed_effect']:.4f}", ""],
         ["Conf. Delta",    "Mean |conf_A − conf_B|", f"{delta['mean']:.4f}",   ""],
@@ -783,7 +907,7 @@ def _page_summary_table(pdf, df, stat, pwr, delta, dr, name_a, name_b, alpha):
 
     col_widths = [0.18, 0.38, 0.24, 0.20]
     col_x      = [0.0,  0.18, 0.56, 0.80]
-    headers    = ["Section", "Metric", "Value", "Interpretation"]
+    headers    = ["Section", "Metric", "Value", "Note"]
 
     y = 0.97
     row_h = 0.036
@@ -809,8 +933,7 @@ def _page_summary_table(pdf, df, stat, pwr, delta, dr, name_a, name_b, alpha):
         ax.text(col_x[1], y, key,    fontsize=8, color=_DARK,  transform=ax.transAxes)
         ax.text(col_x[2], y, val,    fontsize=8, color=_DARK,  transform=ax.transAxes,
                 fontweight="bold")
-        color = _GREEN if "[+]" in interp else _RED if "[-]" in interp else _ORANGE if "[!]" in interp else _GREY
-        ax.text(col_x[3], y, interp, fontsize=8, color=color,  transform=ax.transAxes)
+        ax.text(col_x[3], y, interp, fontsize=8, color=_GREY,  transform=ax.transAxes)
 
         ax.plot([0, 1], [y - row_h * 0.1, y - row_h * 0.1], color="#E0E0E0", lw=0.4, transform=ax.transAxes)
         y -= row_h
@@ -819,7 +942,7 @@ def _page_summary_table(pdf, df, stat, pwr, delta, dr, name_a, name_b, alpha):
     plt.close(fig)
 
 
-# ── Page 9: KDE heatmap + violin per class ─────────────────────────────────
+# ── Page: KDE heatmap + violin per class ─────────────────────────────────
 
 def _page_kde_violin(pdf, df, name_a, name_b):
     """2D KDE confidence density + per-class violin side-by-side."""
@@ -855,9 +978,9 @@ def _page_kde_violin(pdf, df, name_a, name_b):
         pass  # if KDE fails (e.g. singular), skip contour
 
     ax.scatter(conf_a[agree_mask], conf_b[agree_mask],
-               s=6, alpha=0.3, color=_GREEN, label="Agree")
+               s=6, alpha=0.3, color=_AGREE, label="Agree")
     ax.scatter(conf_a[~agree_mask], conf_b[~agree_mask],
-               s=6, alpha=0.5, color=_RED, label="Disagree")
+               s=6, alpha=0.5, color=_DISAGREE, label="Disagree")
     # Diagonal only within visible range
     _pad = 0.05
     _xlo = max(0, conf_a.min() - _pad); _xhi = min(1, conf_a.max() + _pad)
@@ -920,7 +1043,7 @@ def _page_kde_violin(pdf, df, name_a, name_b):
     plt.close(fig)
 
 
-# ── Page 10: Entropy CDF + disagreement decomposition ─────────────────────
+# ── Page: Entropy CDF + disagreement decomposition ─────────────────────
 
 def _page_entropy_disagreement(pdf, df, name_a, name_b):
     """Empirical entropy CDF and disagreement decomposition stacked bar."""
@@ -1022,7 +1145,7 @@ def _page_entropy_disagreement(pdf, df, name_a, name_b):
             counts = {"Agree": n_agree, "Borderline": 0, "Random": 0, "Systematic": 0}
             thr_note = ""
 
-        colors_bar = [_GREEN, _ORANGE, _BLUE, _RED]
+        colors_bar = [_AGREE, _ORANGE, _BLUE, _RED]
         vals_bar   = list(counts.values())
         bars = ax2.bar(list(counts.keys()), vals_bar, color=colors_bar,
                        edgecolor="white", linewidth=1.5)
@@ -1049,7 +1172,7 @@ def _page_entropy_disagreement(pdf, df, name_a, name_b):
 
 
 # ---------------------------------------------------------------------------
-# Page 9: Calibration Analysis  (Guo et al. 2017)
+# Page: Calibration Analysis  (Guo et al. 2017)
 # ---------------------------------------------------------------------------
 
 def _page_calibration_analysis(
@@ -1059,7 +1182,7 @@ def _page_calibration_analysis(
 ) -> None:
     """Reliability diagram + ECE/MCE + calibration-under-shift table."""
     fig = plt.figure(figsize=(11, 8))
-    _header(fig, "Page 9 \u2014 Calibration Analysis",
+    _header(fig, "Calibration Analysis",
             f"Reliability diagram and calibration metrics for {model_name}  "
             "(Guo et al. 2017)")
 
@@ -1209,7 +1332,7 @@ def _page_calibration_analysis(
 
 
 # ---------------------------------------------------------------------------
-# Page 10: Uncertainty Decomposition  (Kendall & Gal 2017)
+# Page: Uncertainty Decomposition  (Kendall & Gal 2017)
 # ---------------------------------------------------------------------------
 
 def _page_uncertainty_decomposition(
@@ -1218,7 +1341,7 @@ def _page_uncertainty_decomposition(
 ) -> None:
     """Stacked bar of aleatoric vs epistemic uncertainty per predicted class."""
     fig = plt.figure(figsize=(11, 8))
-    _header(fig, "Page 10 \u2014 Uncertainty Decomposition",
+    _header(fig, "Uncertainty Decomposition",
             "Aleatoric vs Epistemic uncertainty per class  (Kendall & Gal 2017 / BALD)")
 
     required = {"pred_a", "bald_epistemic", "bald_aleatoric"}

@@ -4,6 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+from scipy import stats
 
 from steeldefect_active_learning.ab_testing.metrics import (
     apply_cuped,
@@ -16,6 +17,7 @@ from steeldefect_active_learning.ab_testing.metrics import (
     power_analysis,
     srm_check,
     statistical_significance_test,
+    statistic_label,
 )
 
 
@@ -280,6 +282,61 @@ class TestStatisticalSignificance:
     def test_null_case_pvalue_high(self, ab_df_balanced):
         stat = statistical_significance_test(ab_df_balanced)
         assert stat["p_value"] > 0.01  # not significant under matched arms
+
+    def test_a_u_statistic_is_not_a_t_statistic(self):
+        # Uniform confidences fail Shapiro-Wilk: the test falls back to Mann-Whitney. Its
+        # U used to be stored as t_stat, and read as a z by the O'Brien-Fleming block.
+        rng = np.random.default_rng(1)
+        df = pd.DataFrame({"confidence_a": rng.uniform(0.5, 1.0, 300),
+                           "confidence_b": rng.uniform(0.5, 1.0, 300)})
+        stat = statistical_significance_test(df)
+        assert stat["test_used"] == "mann_whitney_u"
+        assert np.isnan(stat["t_stat"]) and stat["u_stat"] == 44084.0
+        assert stat["z"] == pytest.approx(                    # U < 300 * 300 / 2: negative
+            -stats.norm.isf(stat["p_value"] / 2), rel=1e-12)
+        assert statistic_label(stat) == "Mann-Whitney U = 44084"
+
+    def test_welch_reports_its_t(self):
+        rng = np.random.default_rng(1)
+        df = pd.DataFrame({"confidence_a": rng.normal(0.70, 0.05, 200),
+                           "confidence_b": rng.normal(0.68, 0.05, 200)})
+        stat = statistical_significance_test(df)
+        assert stat["test_used"] == "welch_t" and np.isnan(stat["u_stat"])
+        assert stat["t_stat"] == pytest.approx(stats.ttest_ind(df["confidence_a"], df["confidence_b"],
+                                                               equal_var=False).statistic, rel=1e-12)
+        assert stat["t_stat"] > 0 and stat["z"] == pytest.approx(
+            stats.norm.isf(stat["p_value"] / 2), rel=1e-12)
+        assert statistic_label(stat) == f"Welch t = {stat['t_stat']:.2f}"
+
+    def test_obrien_fleming_reads_the_normal_score(self):
+        # p = 0.666: the old block compared U = 44084 with 1.96 and stopped, rejecting H0.
+        rng = np.random.default_rng(1)
+        df = pd.DataFrame({"confidence_a": rng.uniform(0.5, 1.0, 300),
+                           "confidence_b": rng.uniform(0.5, 1.0, 300)})
+        out = compute_all_metrics(df, sequential="obrien_fleming")
+        assert out["sequential"]["z_observed"] == out["statistical"]["z"]
+        assert abs(out["sequential"]["z_observed"]) < 1 and out["sequential"]["decision"] == "continue"
+
+    def test_obrien_fleming_stops_on_complete_separation(self):
+        # Every confidence of B above every one of A: U = 0, the strongest evidence there
+        # is. The old block compared U = 0 with its boundary and said continue.
+        df = pd.DataFrame({"confidence_a": np.linspace(0.10, 0.40, 200),
+                           "confidence_b": np.linspace(0.60, 0.90, 200)})
+        out = compute_all_metrics(df, sequential="obrien_fleming")
+        assert out["statistical"]["test_used"] == "mann_whitney_u"
+        assert out["statistical"]["u_stat"] == 0 and out["statistical"]["z"] < -10
+        assert out["sequential"]["decision"] == "stop_reject_h0"
+
+    def test_the_sign_of_z_is_the_direction_of_the_test_that_ran(self):
+        # A beats B on 80 % of the pairs, yet its mean is the lower (a fifth of its
+        # confidences are 0): Mann-Whitney's direction, U - n_a*n_b/2, signs z.
+        n = 500
+        df = pd.DataFrame({"confidence_a": np.where(np.arange(n) % 5 == 0, 0.0, 0.61),
+                           "confidence_b": np.random.default_rng(0).uniform(0.40, 0.60, n)})
+        stat = statistical_significance_test(df)
+        assert stat["test_used"] == "mann_whitney_u"
+        assert stat["u_stat"] == 0.8 * n * n and stat["mean_a"] < stat["mean_b"]
+        assert stat["z"] > 0
 
 
 @pytest.mark.filterwarnings("ignore::RuntimeWarning")
