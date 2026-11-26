@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 import textwrap
 from pathlib import Path
 
@@ -111,7 +112,11 @@ def test_shipped_default_config_loads():
     assert (pr.noninferiority_margin, pr.false_alarm_margin, pr.min_gain) == (0.05, 0.005, 0.0)
     assert (pr.min_detectable_gain, pr.planning_discordance, pr.power) == (0.02, 0.10, 0.80)
     assert pr.require_no_class_regression is True
-    assert SHIPPED_CONFIG_PATH == str(_SHIPPED)
+    # The decision job's default is this file. Compared as files, not strings: on Windows
+    # the drive letter's case follows the working directory that `python -m pytest` puts
+    # first on sys.path, while Path.resolve() returns the canonical 'C:'.
+    assert os.path.isabs(SHIPPED_CONFIG_PATH)
+    assert os.path.samefile(SHIPPED_CONFIG_PATH, _SHIPPED)
 
 
 def test_shipped_prior_is_the_generator_prior():
