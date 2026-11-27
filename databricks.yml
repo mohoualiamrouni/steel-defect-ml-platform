@@ -3,22 +3,22 @@
 #
 # Infrastructure-as-code for the OBT pipeline described in the report
 # (chapter "Réalisation", appendix "Plateforme de données"). The bundle declares
-# six jobs whose task keys reuse the node names of
-# steeldefect_platform/jobs.py::JOBS_DAG (plus seed_obt). Only the daily OBT job
-# (02:00) and the weekly AL job (Monday 03:00) are scheduled; the seed, A/B,
-# regroup and SSL jobs run on demand. Dependencies across jobs are therefore not
-# enforced, and openset_score runs after embedding_refresh rather than after
-# ingest.
+# seven jobs whose task keys reuse the node names of
+# steeldefect_platform/jobs.py::JOBS_DAG (plus seed_obt and register_versions).
+# Only the daily OBT job (02:00) and the weekly AL job (Monday 03:00) are
+# scheduled; the seed, registry demo, A/B decision, regroup and SSL jobs run on
+# demand. Dependencies across jobs are therefore not enforced, and openset_score
+# runs after embedding_refresh rather than after ingest.
 #
-# The tasks of the AL, regroup and SSL jobs invoke the uniform dispatcher
-# steeldefect_platform/run_task.py, which calls the real job_* entrypoints. The
-# seed, A/B and daily OBT tasks (7 of 12) run simplified, self-contained stand-in
-# notebooks (seed_notebook.py, nb_*.py) because, on the serverless workspace
-# used, reading workspace .py files failed with
-# 409 BlobCustomerSpecifiedEncryptionMismatch. For example, nb_severity.py fits
-# least squares with a fixed band instead of XGBoost + CQR, nb_ingest.py appends
-# a fixed synthetic batch instead of merging, and nb_ab.py only registers two
-# model versions (no A/B test). The run_task.py tasks import the package from
+# The tasks of the AL, A/B decision, regroup and SSL jobs invoke the uniform
+# dispatcher steeldefect_platform/run_task.py, which calls the real job_*
+# entrypoints. The seed, registry demo and daily OBT tasks (7 of 13) run
+# simplified, self-contained stand-in notebooks (seed_notebook.py, nb_*.py)
+# because, on the serverless workspace used, reading workspace .py files failed
+# with 409 BlobCustomerSpecifiedEncryptionMismatch. For example, nb_severity.py
+# fits least squares with a fixed band instead of XGBoost + CQR, nb_ingest.py
+# appends a fixed synthetic batch instead of merging, and nb_ab.py only registers
+# two model versions (no A/B test). The run_task.py tasks import the package from
 # workspace .py files too, so they are exposed to the same error on that
 # workspace.
 #
@@ -27,10 +27,12 @@
 #
 # Conceptual DAG nodes deliberately NOT scheduled here (honest scoping):
 #   * segmenter_train  — the inspection CNN is trained outside this repository
-#                        (no training code or GPU job here). The package's A/B
-#                        gate (jobs.job_ab_decision) takes the two model URIs;
-#                        the bundle's ab_decision task runs nb_ab.py, which takes
-#                        none.
+#                        (no training code or GPU job here). That job must
+#                        register the versions, write the evaluation slice
+#                        (steeldefect.ab_eval_slices) and each version's training
+#                        manifest, images and coils, the current champion's
+#                        included (steeldefect.model_training_images), which the
+#                        A/B decision job reads.
 #   * online_regroup   — long-running Structured Streaming
 #                        (defect_clustering/databricks/03_online_regroup.py); it
 #                        would run as a continuous job and is not deployed.
@@ -83,6 +85,9 @@ variables:
   cur_campaign:
     description: Current cohort for drift (MMD)
     default: "campaign-2026-Q2"
+  segmenter_model:
+    description: Unity Catalog name (catalog.schema.model) of the model the A/B decision promotes
+    default: "main.steeldefect.steeldefect_segmenter"
 
 resources:
   jobs:
@@ -111,16 +116,73 @@ resources:
             notebook_path: ./seed_notebook.py
 
     # --- One-off: register two model versions + champion/challenger aliases ----
-    steeldefect_ab:
-      name: "[${bundle.target}] steeldefect-ab"
+    # A registry demo (stand-in notebook): it runs no A/B test and decides nothing, on a
+    # model of its own (..._registry_demo), so that it never moves the real @champion.
+    steeldefect_registry_demo:
+      name: "[${bundle.target}] steeldefect-registry-demo"
       email_notifications:
         on_failure: ["${var.alert_email}"]
       timeout_seconds: 3600
       max_concurrent_runs: 1
       tasks:
-        - task_key: ab_decision
+        - task_key: register_versions
           notebook_task:
             notebook_path: ./nb_ab.py
+
+    # --- On demand: the A/B promotion decision (the tested gate) ---------------
+    # Decides on challenger model_b_version against champion model_a_version of
+    # ${var.segmenter_model} on one frozen slice of steeldefect.ab_eval_slices, records
+    # the decision in steeldefect.ab_decisions, and on promote_B moves @champion from A
+    # to B only if it still points at A. One decision per challenger per slice (a run on
+    # invalid input does not count; promote=false does). Each parameter is passed as
+    # its own --param argument, never spliced into JSON. The dev and prod deployments
+    # share the tables and the model: run the decision from one target only.
+    #   databricks bundle run steeldefect_ab_decision -t dev --params \
+    #     eval_dataset_id=2026-05-eval,model_a_version=6,model_b_version=7
+    steeldefect_ab_decision:
+      name: "[${bundle.target}] steeldefect-ab-decision"
+      email_notifications:
+        on_failure: ["${var.alert_email}"]
+      timeout_seconds: 3600
+      max_concurrent_runs: 1                 # MLflow has no atomic compare-and-set on aliases
+      parameters:                            # empty defaults: the job stops on them first
+        - name: eval_dataset_id
+          default: ""
+        - name: model_a_version
+          default: ""
+        - name: model_b_version
+          default: ""
+        - name: promote
+          default: "true"
+      environments:                          # serverless: deps installed per run
+        - environment_key: steeldefect_env
+          spec:
+            client: "2"
+            dependencies:
+              - scipy
+              - statsmodels
+              - seaborn
+              - pyyaml
+              - mlflow
+      tasks:
+        - task_key: ab_decision
+          environment_key: steeldefect_env
+          spark_python_task:
+            python_file: steeldefect_platform/run_task.py
+            parameters:
+              - "ab_decision"
+              - "--param"
+              - "eval_dataset_id={{job.parameters.eval_dataset_id}}"
+              - "--param"
+              - "model_a_version={{job.parameters.model_a_version}}"
+              - "--param"
+              - "model_b_version={{job.parameters.model_b_version}}"
+              - "--param"
+              - "promote={{job.parameters.promote}}"
+              - "--param"
+              - "model_name=${var.segmenter_model}"
+              - "--param"
+              - "registry_uri=databricks-uc"
 
     # --- Daily OBT pipeline: ingest -> severity -> cutting, + maintenance -----
     steeldefect_obt_daily:

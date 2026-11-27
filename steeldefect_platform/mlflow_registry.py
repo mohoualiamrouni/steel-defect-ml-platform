@@ -146,7 +146,8 @@ def promote_if_champion(model_name: str, version: int, expected_champion: Option
     (an unknown version, an unreachable registry) raises, so that the caller records it.
     MLflow has no atomic compare-and-set on aliases: the alias is read, then written, then
     read back, and a change made by someone else between the read and the write is not
-    detected. Run one promotion at a time.
+    detected. The bundle's A/B job allows one run at a time, which covers that one
+    deployed job only: another target, or a manual write, can still interleave.
     """
     version = int(version)
     expected = None if expected_champion is None else int(expected_champion)

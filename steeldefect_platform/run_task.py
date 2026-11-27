@@ -5,6 +5,7 @@ A Databricks Asset Bundle (``databricks.yml``) runs each DAG node as a
 first parameter::
 
     python run_task.py <task> --params '{"cycle_start": "2026-06-01"}'
+    python run_task.py <task> --param eval_dataset_id=2026-05-eval --param promote=true
 
 The dispatcher maps a ``JOBS_DAG`` task name to its platform entrypoint in
 :mod:`steeldefect_platform.jobs`, so the whole pipeline is invoked through one
@@ -45,29 +46,48 @@ TASKS = {
 }
 
 
-def main(argv=None) -> int:
-    import time
+def parse(argv=None):
+    """The task and its keyword arguments, from the command line.
 
-    from steeldefect_platform.logging_utils import get_logger
-
+    ``--params`` is a JSON object; each ``--param KEY=VALUE`` adds one argument, as a
+    string, and may not repeat a key. A value that people type belongs in ``--param``: a
+    JSON template filled with it lets the value close its string and add keys.
+    """
     parser = argparse.ArgumentParser(description="SteelDefect platform task runner")
     parser.add_argument("task", choices=sorted(TASKS),
                         help="JOBS_DAG node to execute")
     parser.add_argument("--params", default="{}",
                         help="JSON object of keyword arguments for the task")
+    parser.add_argument("--param", action="append", default=[], metavar="KEY=VALUE",
+                        help="one keyword argument, as a string (repeatable)")
     args = parser.parse_args(argv)
-
-    log = get_logger("steeldefect.run_task")
     kwargs = json.loads(args.params)
-    log.info("task '%s' started (params=%s)", args.task, kwargs)
+    if not isinstance(kwargs, dict):
+        parser.error(f"--params: expected a JSON object, got {args.params!r}")
+    for item in args.param:
+        key, sep, value = item.partition("=")
+        if not sep or not key or key in kwargs:
+            parser.error(f"--param {item!r}: expected KEY=VALUE with a new KEY")
+        kwargs[key] = value
+    return args.task, kwargs
+
+
+def main(argv=None) -> int:
+    import time
+
+    from steeldefect_platform.logging_utils import get_logger
+
+    task, kwargs = parse(argv)
+    log = get_logger("steeldefect.run_task")
+    log.info("task '%s' started (params=%s)", task, kwargs)
     t0 = time.time()
     try:
-        result = TASKS[args.task](**kwargs)
+        result = TASKS[task](**kwargs)
     except Exception:
         # Log a full traceback before failing the Databricks task (loud failure).
-        log.exception("task '%s' FAILED after %.1fs", args.task, time.time() - t0)
+        log.exception("task '%s' FAILED after %.1fs", task, time.time() - t0)
         raise
-    log.info("task '%s' done in %.1fs", args.task, time.time() - t0)
+    log.info("task '%s' done in %.1fs", task, time.time() - t0)
     if result is not None:  # e.g. drift_monitor returns a verdict dict
         print(json.dumps(result, default=str))  # machine-readable result on stdout
     return 0

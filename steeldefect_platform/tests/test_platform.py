@@ -39,6 +39,30 @@ def test_dispatcher_matches_dag():
         assert conceptual not in run_task.TASKS
 
 
+def test_dispatcher_keeps_each_param_one_string():
+    # Spliced into a JSON template, this id closed its string and added a key (promote).
+    hostile = 'eval-1", "promote": "true'
+    task, kwargs = run_task.parse(["ab_decision", "--param", f"eval_dataset_id={hostile}",
+                                   "--param", "model_a_version=6", "--param", "note=a=b"])
+    assert task == "ab_decision"
+    assert kwargs == {"eval_dataset_id": hostile, "model_a_version": "6", "note": "a=b"}
+    _, kwargs = run_task.parse(["ab_decision", "--params", '{"promote": false}',
+                                "--param", "model_b_version=7"])
+    assert kwargs == {"promote": False, "model_b_version": "7"}
+
+
+@pytest.mark.parametrize("argv", [
+    ["--param", "promote"],                                        # no "="
+    ["--param", "=true"],                                          # no key
+    ["--param", "promote=true", "--param", "promote=false"],       # a key twice
+    ["--params", '{"promote": true}', "--param", "promote=false"],  # a --params key again
+    ["--params", '["promote"]'],                                   # not a JSON object
+], ids=["no equals sign", "no key", "a key twice", "a key of --params", "a JSON list"])
+def test_dispatcher_rejects_parameters_it_cannot_read_one_way(argv):
+    with pytest.raises(SystemExit):
+        run_task.parse(["ab_decision", *argv])
+
+
 # --- OBT schema constants + row validation ----------------------------------
 
 def test_obt_constants():
