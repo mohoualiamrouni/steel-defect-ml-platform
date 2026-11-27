@@ -27,7 +27,7 @@ local-fallback idiom used in ``flatness_clustering/databricks/``.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Constants — bound to the real code, not invented
@@ -225,14 +225,48 @@ COMPANION_DDL: Dict[str, str] = {
         " score_total DOUBLE, rank INT, selected BOOLEAN, model_uri STRING,"
         " created_ts TIMESTAMP) USING DELTA PARTITIONED BY (al_cycle)"
     ),
+    # One row per image of a frozen A/B evaluation slice: its true label, its coil (one
+    # image per coil), the predictions of A and B and the registry versions that made them.
+    "steeldefect.ab_eval_slices": (
+        "CREATE TABLE IF NOT EXISTS steeldefect.ab_eval_slices ("
+        " eval_dataset_id STRING, image_id STRING, coil_id STRING, sampling_frame STRING,"
+        " label INT, label_name STRING,"
+        " model_a_version INT, pred_a INT, confidence_a DOUBLE,"
+        " model_b_version INT, pred_b INT, confidence_b DOUBLE,"
+        " scored_ts TIMESTAMP) USING DELTA"
+    ),
+    # The images each registered model version was trained on, one row per image with its
+    # coil, which the (external) training job must write, model_name spelt as the decision
+    # job receives it (catalog.schema.model on Unity Catalog). The A/B decision job refuses
+    # a slice that shares an image or a coil with either version's manifest.
+    "steeldefect.model_training_images": (
+        "CREATE TABLE IF NOT EXISTS steeldefect.model_training_images ("
+        " model_name STRING, model_version INT, image_id STRING, coil_id STRING) USING DELTA"
+    ),
+    # The images, and their coils, of each A/B decision that counts (not on invalid input):
+    # a challenger gets no second decision on a slice that shares any of them.
+    "steeldefect.ab_decision_images": (
+        "CREATE TABLE IF NOT EXISTS steeldefect.ab_decision_images ("
+        " decision_id STRING, image_id STRING, coil_id STRING) USING DELTA"
+    ),
+    # The A/B decision audit trail, one row per event: the decision (event 'decision',
+    # written before any registry write), then, when a promotion was attempted, its outcome
+    # (event 'promotion', same decision_id). The verdict, the diagnostics and
+    # the job's parameters are kept whole as strict JSON. Rows written before gate_version
+    # existed keep it NULL (their diagnostics columns, welch_t to srm_p, stay in old tables).
     "steeldefect.ab_decisions": (
         "CREATE TABLE IF NOT EXISTS steeldefect.ab_decisions ("
-        " ab_run_id STRING, model_a_uri STRING, model_b_uri STRING,"
-        " eval_dataset_id STRING, metric STRING, welch_t DOUBLE, welch_p DOUBLE,"
-        " mannwhitney_p DOUBLE, mcnemar_p DOUBLE, bh_reject BOOLEAN,"
-        " cohen_d DOUBLE, ci_low DOUBLE, ci_high DOUBLE, srm_p DOUBLE,"
-        " prob_b_better DOUBLE, decision STRING, promoted_model_uri STRING,"
-        " decided_ts TIMESTAMP) USING DELTA"
+        " decision_id STRING, event STRING, event_ts TIMESTAMP, gate_version STRING,"
+        " model_name STRING, model_a_version INT, model_a_uri STRING,"
+        " model_b_version INT, model_b_uri STRING,"
+        " eval_dataset_id STRING, sampling_frame STRING, slice_sha256 STRING, n_images INT,"
+        " decision STRING, conclusion STRING, failing_criteria STRING,"
+        " estimand STRING, estimand_delta DOUBLE, estimand_lower DOUBLE,"
+        " mcnemar_p DOUBLE, prob_b_better DOUBLE,"
+        " both_correct INT, only_a_correct INT, only_b_correct INT, both_wrong INT,"
+        " promotion_status STRING, promotion_detail STRING,"
+        " champion_before INT, champion_after INT, promoted_model_uri STRING,"
+        " verdict_json STRING, diagnostics_json STRING, job_json STRING) USING DELTA"
     ),
     "steeldefect.defect_regrouping": (
         "CREATE TABLE IF NOT EXISTS steeldefect.defect_regrouping ("
@@ -299,6 +333,26 @@ def validate_row(d: Dict[str, Any]) -> None:
     elif kind == "group":
         if d.get("density_per_m2") is None:
             raise ValueError("group defect requires density_per_m2")
+
+
+def ddl_columns(table: str) -> List[Tuple[str, str]]:
+    """The ``(name, type)`` columns of a companion table, read from its DDL.
+
+    The companion DDLs use no parametrised type (no DECIMAL(p, s)), so a comma always
+    separates two columns.
+    """
+    ddl = COMPANION_DDL[table]
+    start = end = ddl.index("(") + 1
+    depth = 1
+    while depth:
+        depth += {"(": 1, ")": -1}.get(ddl[end], 0)
+        end += 1
+    return [tuple(part.split(None, 1)) for part in (p.strip() for p in ddl[start:end - 1].split(","))]
+
+
+def ddl_schema(table: str) -> str:
+    """A companion table's columns as a Spark DDL schema string (``"name TYPE, ..."``)."""
+    return ", ".join(f"{name} {kind}" for name, kind in ddl_columns(table))
 
 
 def create_table(spark, table: str = OBT_TABLE, with_companions: bool = True) -> None:

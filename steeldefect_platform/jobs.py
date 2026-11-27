@@ -10,7 +10,7 @@ DAG (see report appendix ``app:mlops``)::
 
     ingest (stream/availableNow)
       ├─ al_pool_build (weekly) ─ [expert label] ─ MERGE is_labeled
-      │     └─ segmenter_train ─ ab_decision ─(promote_B?)─ promote(steeldefect_segmenter)
+      │     └─ segmenter_train ─ ab_decision ─(promote_B, @champion still A?)─ @champion -> B
       ├─ defect_regroup_train (per release) ─ register(steeldefect_defect_clusterer)
       │     └─ online_regroup (stream)
       └─ severity_score (per-coil µbatch) ─ upsert severity ─ cutting_plan
@@ -22,7 +22,7 @@ No Spark import at module load.
 from __future__ import annotations
 
 import os
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 #: task -> list of upstream task names it depends on.
 JOBS_DAG: Dict[str, List[str]] = {
@@ -78,9 +78,22 @@ def job_al_pool_build(cycle_start: str, budget: int = 200, **kw) -> None:
     m.main(_spark(), cycle_start=cycle_start, budget=budget, **kw)
 
 
-def job_ab_decision(eval_dataset_id: str, model_a_uri: str, model_b_uri: str) -> None:
+def job_ab_decision(eval_dataset_id: str, model_a_version, model_b_version,
+                    promote=True, config_path: Optional[str] = None,
+                    model_name: Optional[str] = None,
+                    registry_uri: Optional[str] = None) -> Optional[str]:
+    """Decide on challenger ``model_b_version`` against champion ``model_a_version``.
+
+    The versions are registry versions of ``model_name`` (default: the job's
+    ``steeldefect_segmenter``; on Unity Catalog, the full catalog.schema.model name), and
+    job parameters may pass them, and ``promote``, as strings. Returns the URI of the
+    version promoted, else None.
+    """
     m = _load_script("steeldefect_active_learning/databricks/02_ab_decision.py")
-    m.main(_spark(), eval_dataset_id, model_a_uri, model_b_uri)
+    return m.main(_spark(), eval_dataset_id, model_a_version, model_b_version,
+                  model_name=m.MODEL_NAME if model_name is None else model_name,
+                  promote=promote,
+                  config_path=config_path, registry_uri=registry_uri)
 
 
 def job_defect_regroup(run_id: str, target_k: int = 28) -> None:
