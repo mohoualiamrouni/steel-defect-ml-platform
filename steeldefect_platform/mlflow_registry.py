@@ -14,7 +14,7 @@ Mirrors the register/load idiom already used in
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Dict, Optional
 
 # Registered model names — the single place they are spelled.
 SEGMENTER = "steeldefect_segmenter"
@@ -106,6 +106,68 @@ def promote(model_name: str, version: int, alias: str = PROD_ALIAS,
         )
         _log().warning("alias API unavailable; used deprecated stage %s for %s v%s",
                        to_stage, model_name, version)
+
+
+def use_registry(registry_uri: str) -> None:
+    """Point MLflow at a model registry, e.g. ``databricks-uc`` (Unity Catalog), where a
+    model name is ``catalog.schema.model``: a short name is completed with the session's
+    current catalog and schema, which is not the model the repository registers."""
+    _mlflow().set_registry_uri(registry_uri)
+
+
+def alias_version(model_name: str, alias: str = PROD_ALIAS,
+                  client: Optional[Any] = None) -> Optional[int]:
+    """The version that ``alias`` points at, or None when the alias is not set.
+
+    Reads the registered model's alias map, so an unset alias is told apart from a
+    registry error: a missing model or an unreachable registry raises. ``client`` is an
+    ``MlflowClient`` (default: one on the configured registry).
+    """
+    client = client if client is not None else _mlflow().tracking.MlflowClient()
+    version = client.get_registered_model(model_name).aliases.get(alias)
+    return None if version is None else int(version)
+
+
+def promote_if_champion(model_name: str, version: int, expected_champion: Optional[int],
+                        alias: str = PROD_ALIAS,
+                        client: Optional[Any] = None) -> Dict[str, Any]:
+    """Point ``alias`` at ``version`` only if it still points at ``expected_champion``.
+
+    The A/B gate compared B with one model, A, the champion when the slice was scored. If
+    the alias has moved since (a newer champion, or a rollback), B was never compared with
+    the model it would replace, and it is not promoted. ``expected_champion`` None means
+    that no version held the alias: the first promotion of a model. An alias that already
+    points at ``version`` counts as applied, with nothing written: a promotion resumed
+    after a crash finds it there.
+
+    Returns ``{"applied", "champion_before", "champion_after", "detail"}``; a registry error
+    (an unknown version, an unreachable registry) raises, so that the caller records it.
+    MLflow has no atomic compare-and-set on aliases: the alias is read, then written, then
+    read back, and a change made by someone else between the read and the write is not
+    detected. Run one promotion at a time.
+    """
+    version = int(version)
+    expected = None if expected_champion is None else int(expected_champion)
+    client = client if client is not None else _mlflow().tracking.MlflowClient()
+    before = alias_version(model_name, alias, client)
+    if before == version:
+        return {"applied": True, "champion_before": before, "champion_after": before,
+                "detail": f"@{alias} of {model_name} already points at v{version}: nothing written"}
+    if before != expected:
+        return {"applied": False, "champion_before": before, "champion_after": before,
+                "detail": (f"@{alias} of {model_name} is "
+                           f"{'unset' if before is None else f'v{before}'}, but B was compared "
+                           f"with {'no champion' if expected is None else f'v{expected}'}")}
+    client.set_registered_model_alias(model_name, alias, version)
+    after = alias_version(model_name, alias, client)
+    if after != version:
+        raise RuntimeError(f"@{alias} of {model_name} reads v{after} after it was set to "
+                           f"v{version}")
+    _log().info("promoted %s v%s -> @%s (was %s)", model_name, version, alias,
+                "unset" if before is None else f"v{before}")
+    return {"applied": True, "champion_before": before, "champion_after": after,
+            "detail": (f"@{alias} of {model_name}: "
+                       f"{'unset' if before is None else f'v{before}'} -> v{after}")}
 
 
 def latest_uri(model_name: str, alias: str = PROD_ALIAS,
