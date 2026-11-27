@@ -16,7 +16,9 @@ import pytest
 
 from steeldefect_active_learning.ab_testing import paired
 from steeldefect_active_learning.ab_testing.metrics import compute_all_metrics
-from steeldefect_active_learning.ab_testing.promotion import decide_promotion, gate_and_register
+from steeldefect_active_learning.ab_testing.promotion import (
+    apply_promotion, decide_promotion, gate_and_register, plan_promotion,
+)
 
 DEMO = Path(__file__).resolve().parents[1] / "data" / "demo_ab_predictions.csv"
 PRIOR = {0: 0.118, 1: 0.031, 2: 0.018, 3: 0.0061, 4: 0.024, 5: 0.0025, 6: 0.043, 7: 0.071,
@@ -625,31 +627,130 @@ def test_end_to_end_from_compute_all_metrics():
     assert v["decision"] == "promote_B" and v["n_images"] == len(df)
 
 
-def test_gate_and_register_forwards_thresholds(monkeypatch):
+B_URI = "models:/steeldefect_segmenter/7"
+
+
+@pytest.fixture
+def registry_calls(monkeypatch):
+    """Records the compare-and-set calls; the champion is v6 unless a test changes it. A
+    test may make the call fail before or after its write, or the alias unreadable."""
     import steeldefect_platform.mlflow_registry as registry
     calls = []
-    monkeypatch.setattr(registry, "promote", lambda *args, **kwargs: calls.append((args, kwargs)))
+    state = {"champion": 6, "error": None, "error_after_write": False, "read_error": None}
+
+    def promote_if_champion(model_name, version, expected_champion, client=None):
+        calls.append((model_name, version, expected_champion))
+        if state["error"] is not None:
+            if state["error_after_write"]:
+                state["champion"] = version
+            raise state["error"]
+        before = state["champion"]
+        if before != expected_champion:
+            return {"applied": False, "champion_before": before, "champion_after": before,
+                    "detail": f"@champion is v{before}, but B was compared with v{expected_champion}"}
+        state["champion"] = version
+        return {"applied": True, "champion_before": before, "champion_after": version,
+                "detail": f"v{before} -> v{version}"}
+
+    def alias_version(model_name, alias="champion", client=None):
+        if state["read_error"] is not None:
+            raise state["read_error"]
+        return state["champion"]
+
+    monkeypatch.setattr(registry, "promote_if_champion", promote_if_champion)
+    monkeypatch.setattr(registry, "alias_version", alias_version)
+    return calls, state
+
+
+def test_gate_and_register_forwards_thresholds(registry_calls):
+    calls, _ = registry_calls
     cascade = {"paired_counts": paired.paired_counts(promote_frame())}
 
     keep = gate_and_register({"paired_counts": paired.paired_counts(_fixture_frame())},
-                             "models:/steeldefect_segmenter/8", model_b_version=8, **SHIPPED)
+                             "models:/steeldefect_segmenter/8", model_b_version=8,
+                             model_a_version=6, **SHIPPED)
     assert keep["decision"] == "keep_A" and keep["promoted_model_uri"] is None and calls == []
+    assert keep["promotion"]["status"] == "not_applicable"
 
-    v = gate_and_register(cascade, "models:/steeldefect_segmenter/7", model_b_version=7, **SHIPPED)
-    assert v["decision"] == "promote_B"
-    assert calls == [(("steeldefect_segmenter", 7), {"to_stage": "Production"})]
-    assert v["promoted_model_uri"] == "models:/steeldefect_segmenter/7"
+    v = gate_and_register(cascade, B_URI, model_b_version=7, model_a_version=6, **SHIPPED)
+    assert v["decision"] == "promote_B" and calls == [("steeldefect_segmenter", 7, 6)]
+    assert v["promotion"]["status"] == "applied" and v["promoted_model_uri"] == B_URI
+    assert (v["promotion"]["champion_before"], v["promotion"]["champion_after"]) == (6, 7)
     assert v["thresholds"]["alpha"] == 0.05 and v["thresholds"]["class_prior"][0] == {"class": 0, "weight": 0.118}
 
     with pytest.raises(TypeError):
         gate_and_register(cascade, "models:/x/1", model_b_version=1, min_cohen_d=0.2)
 
 
-def test_gate_and_register_without_thresholds_keeps_a(monkeypatch):
+def test_gate_and_register_without_thresholds_keeps_a(registry_calls):
     # Unconfigured (no taxonomy, no prior): fail-closed, and the registry is not called.
-    import steeldefect_platform.mlflow_registry as registry
-    calls = []
-    monkeypatch.setattr(registry, "promote", lambda *args, **kwargs: calls.append(args))
+    calls, _ = registry_calls
     v = gate_and_register({"paired_counts": paired.paired_counts(promote_frame())},
-                          "models:/steeldefect_segmenter/7", model_b_version=7)
+                          B_URI, model_b_version=7, model_a_version=6)
     assert v["decision"] == "keep_A" and calls == []
+
+
+@pytest.mark.parametrize("kwargs, status, detail", [
+    ({}, "not_requested", "promote_B without model_b_version: decision only"),
+    ({"model_b_version": 7}, "refused",
+     "model_a_version None is not a positive integer: the champion B was compared with is "
+     "unknown"),
+    ({"model_b_version": 7, "model_a_version": 6, "model_b_uri": "models:/steeldefect_segmenter/5"},
+     "refused", "model_b_uri 'models:/steeldefect_segmenter/5' does not name "
+                "'models:/steeldefect_segmenter/7', the version to promote"),
+    ({"model_b_version": True, "model_a_version": 6}, "refused",
+     "model_b_version True is not a positive integer"),
+], ids=["no version", "no baseline", "uri of another version", "bool version"])
+def test_a_promotion_the_gate_cannot_tie_to_its_comparison_is_not_attempted(
+        registry_calls, kwargs, status, detail):
+    calls, _ = registry_calls
+    uri = kwargs.pop("model_b_uri", B_URI)
+    v = gate_and_register({"paired_counts": paired.paired_counts(promote_frame())}, uri,
+                          **kwargs, **SHIPPED)
+    assert v["decision"] == "promote_B" and calls == []
+    assert (v["promotion"]["status"], v["promotion"]["detail"]) == (status, detail)
+    assert v["promoted_model_uri"] is None
+
+
+def test_a_champion_that_moved_refuses_the_promotion(registry_calls):
+    # B was compared with v6; v8 became the champion since.
+    calls, state = registry_calls
+    state["champion"] = 8
+    v = gate_and_register({"paired_counts": paired.paired_counts(promote_frame())}, B_URI,
+                          model_b_version=7, model_a_version=6, **SHIPPED)
+    assert calls == [("steeldefect_segmenter", 7, 6)] and state["champion"] == 8
+    assert v["promotion"]["status"] == "refused" and v["promoted_model_uri"] is None
+    assert v["promotion"]["champion_before"] == 8
+
+
+def test_promote_false_records_the_decision_only(registry_calls):
+    calls, _ = registry_calls
+    plan = plan_promotion({"decision": "promote_B"}, "steeldefect_segmenter", B_URI, 7, 6,
+                          promote=False)
+    assert (plan["status"], plan["detail"]) == ("not_requested",
+                                                "promote_B with promote=False: decision only")
+    assert apply_promotion(plan, "steeldefect_segmenter", 7, 6) == plan and calls == []
+
+
+@pytest.mark.parametrize("after_write, read_error, status, champion, detail_end", [
+    (False, None, "failed", 6, "; @champion reads v6"),
+    (True, None, "applied", 7, "; @champion reads v7"),
+    (False, TimeoutError("again"), "unknown", None,
+     "; @champion could not be read back (TimeoutError): check it by hand"),
+], ids=["before the write", "after the write", "alias unreadable"])
+def test_a_registry_error_reports_what_the_alias_reads_and_is_logged(
+        registry_calls, caplog, after_write, read_error, status, champion, detail_end):
+    # It used to be swallowed: promoted_model_uri None, as if no promotion was asked for,
+    # even when the error came after the alias had moved.
+    _, state = registry_calls
+    state.update(error=ConnectionError("registry unreachable"), error_after_write=after_write,
+                 read_error=read_error)
+    with caplog.at_level("ERROR", logger="steeldefect_active_learning.ab_testing.promotion"):
+        v = gate_and_register({"paired_counts": paired.paired_counts(promote_frame())}, B_URI,
+                              model_b_version=7, model_a_version=6, **SHIPPED)
+    promotion = v["promotion"]
+    assert v["decision"] == "promote_B" and promotion["status"] == status
+    assert promotion["champion_after"] == champion
+    assert promotion["detail"] == "registry error: ConnectionError: registry unreachable" + detail_end
+    assert v["promoted_model_uri"] == (B_URI if status == "applied" else None)
+    assert "promotion of steeldefect_segmenter v7 failed" in caplog.text

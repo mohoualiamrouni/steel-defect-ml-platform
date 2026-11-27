@@ -86,13 +86,15 @@ def register(run, model, model_name: str, flavor: str = "sklearn") -> str:
 
 def promote(model_name: str, version: int, alias: str = PROD_ALIAS,
             to_stage: str = "Production", archive_existing: bool = True) -> None:
-    """Point the production **alias** at a model version (alias-based promotion).
+    """Point the production **alias** at a model version, whatever it points at now.
 
-    Called ONLY by the A/B promotion gate (``02_ab_decision`` /
-    ``ab_testing.promotion.gate_and_register``) for ``steeldefect_segmenter`` and by
-    the offline training jobs for the other models. Uses the modern alias API
-    (MLflow >= 2.9); falls back to the deprecated stage transition on older
-    MLflow, logging which path was taken rather than failing silently.
+    An unconditional write: the A/B gate does not use it (it calls
+    :func:`promote_if_champion`, which first checks that the alias still points at the
+    model B was compared with). The registry round trip of
+    ``demo_industrialization.demo_registry`` uses it, and a rollback does the same write
+    by hand (DEPLOY_RUNBOOK.md). Uses the alias API (MLflow >= 2.9); falls back to the
+    deprecated stage transition on older MLflow, logging which path was taken rather than
+    failing silently.
     """
     mlflow = _mlflow()
     client = mlflow.tracking.MlflowClient()

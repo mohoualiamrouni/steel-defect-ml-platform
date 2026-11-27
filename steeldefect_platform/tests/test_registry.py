@@ -90,3 +90,48 @@ def test_alias_version_tells_an_unset_alias_from_a_missing_model(model):
     assert registry.alias_version(name, client=client) is None
     with pytest.raises(MlflowException):
         registry.alias_version(f"{name}_missing", client=client)
+
+
+def test_the_gate_applies_its_promotion_through_the_registry(model):
+    from steeldefect_active_learning.ab_testing.promotion import apply_promotion, plan_promotion
+    client, name = model
+    client.set_registered_model_alias(name, "champion", 1)
+    plan = plan_promotion({"decision": "promote_B"}, name, f"models:/{name}/2", 2, 1)
+    out = apply_promotion(plan, name, 2, 1, client=client)
+    assert out["status"] == "applied" and out["promoted_model_uri"] == f"models:/{name}/2"
+    assert registry.alias_version(name, client=client) == 2
+    # Another challenger, compared with v1 too, is refused: v2 is the champion now.
+    plan = plan_promotion({"decision": "promote_B"}, name, f"models:/{name}/3", 3, 1)
+    out = apply_promotion(plan, name, 3, 1, client=client)
+    assert out["status"] == "refused" and out["promoted_model_uri"] is None
+    assert registry.alias_version(name, client=client) == 2
+
+
+class _ReadBackTimesOut:
+    """A client whose second alias read, the read-back after the write, times out once."""
+
+    def __init__(self, client):
+        self.client, self.reads = client, 0
+
+    def get_registered_model(self, name):
+        self.reads += 1
+        if self.reads == 2:
+            raise TimeoutError("read-back timed out")
+        return self.client.get_registered_model(name)
+
+    def set_registered_model_alias(self, *args):
+        return self.client.set_registered_model_alias(*args)
+
+
+def test_an_error_after_the_write_is_reported_with_what_the_alias_reads(model):
+    # The write may succeed before the error: what the alias reads then decides the
+    # outcome, applied here, not failed.
+    from steeldefect_active_learning.ab_testing.promotion import apply_promotion, plan_promotion
+    client, name = model
+    client.set_registered_model_alias(name, "champion", 1)
+    plan = plan_promotion({"decision": "promote_B"}, name, f"models:/{name}/2", 2, 1)
+    out = apply_promotion(plan, name, 2, 1, client=_ReadBackTimesOut(client))
+    assert out["status"] == "applied" and out["promoted_model_uri"] == f"models:/{name}/2"
+    assert out["detail"] == ("registry error: TimeoutError: read-back timed out; "
+                             "@champion reads v2")
+    assert registry.alias_version(name, client=client) == 2

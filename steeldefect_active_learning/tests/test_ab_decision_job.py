@@ -92,9 +92,16 @@ def job(monkeypatch):
 
 @pytest.fixture
 def registry_calls(monkeypatch):
+    """Records the compare-and-set calls on a registry whose champion is v6."""
     import steeldefect_platform.mlflow_registry as registry
     calls = []
-    monkeypatch.setattr(registry, "promote", lambda *args, **kwargs: calls.append(args))
+
+    def promote_if_champion(model_name, version, expected_champion, client=None):
+        calls.append((model_name, version, expected_champion))
+        return {"applied": expected_champion == 6, "champion_before": 6,
+                "champion_after": version if expected_champion == 6 else 6, "detail": ""}
+
+    monkeypatch.setattr(registry, "promote_if_champion", promote_if_champion)
     return calls
 
 
@@ -173,9 +180,9 @@ def test_job_promotes_only_with_a_model_version(job, registry_calls, config_path
     spark = FakeSpark(_promote_frame())
     promoted = job.main(spark, "eval-1", "models:/steeldefect_segmenter/6",
                         "models:/steeldefect_segmenter/7", model_b_version=7,
-                        config_path=config_path)
+                        config_path=config_path, model_a_version=6)
     assert promoted == "models:/steeldefect_segmenter/7"
-    assert registry_calls == [("steeldefect_segmenter", 7)]
+    assert registry_calls == [("steeldefect_segmenter", 7, 6)]
     assert spark.saved[0][1][0]["promoted_model_uri"] == "models:/steeldefect_segmenter/7"
 
 

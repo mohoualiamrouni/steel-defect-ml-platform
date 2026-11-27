@@ -3,9 +3,10 @@
 Loads the frozen evaluation slice, runs ``compute_all_metrics`` and the promotion gate
 with the thresholds of ``pipeline_config.yaml`` (``ab_testing.promotion``), appends the
 audit row to ``steeldefect.ab_decisions``, and only on ``promote_B`` with a
-``model_b_version`` points the ``@champion`` alias at B. The bundle does not schedule this
-job (its ab_decision task runs nb_ab.py), and the dispatcher passes no model version, so
-it cannot promote yet. Spark is injected by Databricks.
+``model_b_version`` and a ``model_a_version`` moves the ``@champion`` alias from A to B,
+if it still points at A. The bundle does not schedule this job (its ab_decision task runs
+nb_ab.py), and the dispatcher passes no model version, so it cannot promote yet. Spark is
+injected by Databricks.
 
     run:  main(spark, eval_dataset_id="2026-05-eval", model_a_uri=..., model_b_uri=...)
 """
@@ -75,7 +76,8 @@ def _write_decision(spark, verdict: dict, all_metrics: dict,
 
 def main(spark, eval_dataset_id: str, model_a_uri: str, model_b_uri: str,
          model_b_version: Optional[int] = None,
-         config_path: Optional[str] = None) -> Optional[str]:
+         config_path: Optional[str] = None,
+         model_a_version: Optional[int] = None) -> Optional[str]:
     _bootstrap_path()
     from steeldefect_active_learning.ab_testing.metrics import compute_all_metrics
     from steeldefect_active_learning.ab_testing.promotion import gate_and_register
@@ -92,7 +94,8 @@ def main(spark, eval_dataset_id: str, model_a_uri: str, model_b_uri: str,
     )
     verdict = gate_and_register(
         metrics, model_b_uri=model_b_uri, model_name="steeldefect_segmenter",
-        model_b_version=model_b_version, **cfg.gate_kwargs(),
+        model_b_version=model_b_version, model_a_version=model_a_version,
+        **cfg.gate_kwargs(),
     )
     _write_decision(spark, verdict, metrics, eval_dataset_id, model_a_uri, model_b_uri)
     for reason in verdict["reasons"]:

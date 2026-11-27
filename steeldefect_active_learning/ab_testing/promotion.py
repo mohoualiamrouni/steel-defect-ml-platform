@@ -42,7 +42,11 @@ models were scored, and ``class_prior`` describes the deployment stream. False a
 checked with a harm veto: it fires on evidence that B adds false alarms into a class
 beyond its margin, and does not certify that B adds none.
 
-The gate decides; :func:`gate_and_register` applies a ``promote_B`` to the model registry.
+The gate decides. :func:`plan_promotion` and :func:`apply_promotion` carry a ``promote_B``
+to the model registry by a compare-and-set on ``@champion`` (a read, then a write: MLflow
+has no atomic one, see ``mlflow_registry.promote_if_champion``): B replaces only the version
+it was compared with, and the outcome (applied, refused, failed, unknown) is reported,
+never swallowed. :func:`gate_and_register` runs the three in turn.
 
 References:
     Berger (1982) "Multiparameter hypothesis testing and acceptance sampling",
@@ -53,6 +57,8 @@ References:
 
 from __future__ import annotations
 
+import logging
+import numbers
 from typing import Any, Dict, Hashable, List, Mapping, Optional, Sequence, Union
 
 from ..config import check_gate_thresholds
@@ -71,6 +77,8 @@ from .paired import (
 )
 
 VERDICT_SCHEMA = "promotion_verdict/2"
+
+logger = logging.getLogger(__name__)
 
 
 def _crit(name: str, passed: bool, detail: str) -> Dict[str, Any]:
@@ -394,34 +402,143 @@ def decide_promotion(
     return verdict
 
 
+def _version(value: Any) -> Optional[int]:
+    """A registry version: a positive integer (not a bool), else None."""
+    if isinstance(value, bool) or not isinstance(value, numbers.Integral) or value < 1:
+        return None
+    return int(value)
+
+
+def version_uri(model_name: str, version: int) -> str:
+    """The registry URI of one model version."""
+    return f"models:/{model_name}/{version}"
+
+
+def plan_promotion(
+    verdict: Mapping[str, Any],
+    model_name: str,
+    model_b_uri: str,
+    model_b_version: Optional[int],
+    model_a_version: Optional[int],
+    promote: bool = True,
+) -> Dict[str, Any]:
+    """What applying a verdict to the registry takes, checked before any registry call.
+
+    ``status`` is one of:
+
+    - ``not_applicable``: the gate kept A;
+    - ``not_requested``: promote_B, but ``promote`` is False or no ``model_b_version``
+      was given: the decision only;
+    - ``refused``: promote_B, but the promotion cannot be tied to what the gate compared:
+      ``model_b_uri`` does not name ``model_b_version`` of ``model_name`` (the URI recorded
+      must be the version moved), or ``model_a_version`` is missing or invalid (without
+      it, the champion B was compared with cannot be checked);
+    - ``pending``: :func:`apply_promotion` may call the registry.
+
+    Returns ``{"status", "detail", "champion_before", "champion_after",
+    "promoted_model_uri"}``, the last three None.
+    """
+    def outcome(status: str, detail: str) -> Dict[str, Any]:
+        return {"status": status, "detail": detail, "champion_before": None,
+                "champion_after": None, "promoted_model_uri": None}
+
+    if verdict.get("decision") != "promote_B":
+        return outcome("not_applicable", f"decision {verdict.get('decision')}: nothing to apply")
+    if not promote:
+        return outcome("not_requested", "promote_B with promote=False: decision only")
+    if model_b_version is None:
+        return outcome("not_requested", "promote_B without model_b_version: decision only")
+    b, a = _version(model_b_version), _version(model_a_version)
+    if b is None:
+        return outcome("refused", f"model_b_version {model_b_version!r} is not a positive "
+                                  f"integer")
+    if model_b_uri != version_uri(model_name, b):
+        return outcome("refused", f"model_b_uri {model_b_uri!r} does not name "
+                                  f"{version_uri(model_name, b)!r}, the version to promote")
+    if a is None:
+        return outcome("refused", f"model_a_version {model_a_version!r} is not a positive "
+                                  f"integer: the champion B was compared with is unknown")
+    return outcome("pending", f"promote {model_name} v{b} over v{a}")
+
+
+def apply_promotion(
+    plan: Mapping[str, Any],
+    model_name: str,
+    model_b_version: Optional[int],
+    model_a_version: Optional[int],
+    client: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Carry out a ``pending`` plan with ``mlflow_registry.promote_if_champion``.
+
+    Any other plan is returned as it is. A pending plan becomes ``applied`` (``@champion``
+    points at B) or ``refused`` (``@champion`` no longer points at A: B was not compared
+    with the model it would replace). A registry error is logged with its traceback, and
+    the alias is read again, since the error may have come after the write: ``applied``
+    if it reads B, ``failed`` if it reads anything else (with what it reads), ``unknown``
+    if it cannot be read. Never raises: the caller records the outcome and decides how to
+    end. ``client`` is an ``MlflowClient`` (default: the configured registry).
+    """
+    if plan.get("status") != "pending":
+        return dict(plan)
+    from steeldefect_platform.mlflow_registry import alias_version, promote_if_champion
+    out = {"status": "failed", "detail": "", "champion_before": None, "champion_after": None,
+           "promoted_model_uri": None}
+    try:
+        cas = promote_if_champion(model_name, model_b_version,
+                                  expected_champion=model_a_version, client=client)
+    except Exception as exc:  # noqa: BLE001 - recorded and logged, not swallowed
+        logger.exception("promotion of %s v%s failed", model_name, model_b_version)
+        error = f"registry error: {type(exc).__name__}: {exc}"
+        try:
+            now = alias_version(model_name, client=client)
+        except Exception as again:  # noqa: BLE001 - the outcome is unknown, and says so
+            out.update(status="unknown",
+                       detail=f"{error}; @champion could not be read back "
+                              f"({type(again).__name__}): check it by hand")
+            return out
+        out["champion_after"] = now
+        if now == model_b_version:
+            out.update(status="applied", detail=f"{error}; @champion reads v{now}",
+                       promoted_model_uri=version_uri(model_name, now))
+        else:
+            out["detail"] = (f"{error}; @champion reads "
+                             f"{'unset' if now is None else f'v{now}'}")
+        return out
+    out.update(champion_before=cas["champion_before"], champion_after=cas["champion_after"],
+               detail=cas["detail"])
+    if cas["applied"]:
+        out.update(status="applied",
+                   promoted_model_uri=version_uri(model_name, cas["champion_after"]))
+    else:
+        out["status"] = "refused"
+    return out
+
+
 def gate_and_register(
     all_metrics: Mapping[str, Any],
     model_b_uri: str,
     model_name: str = "steeldefect_segmenter",
     model_b_version: Optional[int] = None,
+    model_a_version: Optional[int] = None,
     **thresholds: Any,
 ) -> Dict[str, Any]:
-    """Run the gate; on ``promote_B`` with a ``model_b_version``, promote B in the registry.
+    """Run the gate, then carry a ``promote_B`` to the registry by a compare-and-set.
 
     Calls ``decide_promotion(all_metrics, **thresholds)``, so a misspelt or retired
-    threshold raises TypeError. Only on promote_B with a ``model_b_version`` does it call
-    ``steeldefect_platform.mlflow_registry.promote``, which points the ``@champion`` alias
-    at that version. Any exception raised there is swallowed and ``promoted_model_uri`` is
-    None, so a failed promotion is reported like no promotion.
+    threshold raises TypeError, then :func:`plan_promotion` and :func:`apply_promotion`:
+    on promote_B with a ``model_b_version``, ``@champion`` moves to B only if
+    ``model_b_uri`` names that version and ``@champion`` still points at
+    ``model_a_version``, the model B was compared with.
 
-    Returns the verdict augmented with ``promoted_model_uri`` (the URI when promoted, else
-    None), ``model_name`` and ``model_b_uri``.
+    Returns the verdict augmented with ``promotion`` (status, detail, champion before and
+    after), ``promoted_model_uri`` (the version moved, else None), ``model_name`` and
+    ``model_b_uri``. A registry error is logged and reported with what ``@champion`` reads
+    afterwards (``applied``, ``failed`` or ``unknown``), never as no promotion.
     """
     verdict = decide_promotion(all_metrics, **thresholds)
-    promoted_uri = None
-    if verdict["decision"] == "promote_B" and model_b_version is not None:
-        try:
-            from steeldefect_platform.mlflow_registry import promote
-            promote(model_name, model_b_version, to_stage="Production")
-            promoted_uri = model_b_uri
-        except Exception:
-            promoted_uri = None  # registry unavailable; verdict still returned
-    verdict["promoted_model_uri"] = promoted_uri
+    plan = plan_promotion(verdict, model_name, model_b_uri, model_b_version, model_a_version)
+    verdict["promotion"] = apply_promotion(plan, model_name, model_b_version, model_a_version)
+    verdict["promoted_model_uri"] = verdict["promotion"]["promoted_model_uri"]
     verdict["model_name"] = model_name
     verdict["model_b_uri"] = model_b_uri
     return verdict
