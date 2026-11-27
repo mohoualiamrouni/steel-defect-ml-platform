@@ -1,9 +1,11 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # Segmenter model registry — versioning + champion/challenger (MLOps wiring)
-# MAGIC Registers two versions of the inspection segmenter in Unity Catalog and assigns
-# MAGIC the production aliases. This screenshot proves the **registry / promotion
-# MAGIC infrastructure** on real Azure Databricks — nothing more.
+# MAGIC Registers two versions of a demo segmenter in Unity Catalog and assigns the
+# MAGIC production aliases. This screenshot proves the **registry / promotion
+# MAGIC infrastructure** on real Azure Databricks — nothing more. The demo has a model of
+# MAGIC its own (`..._registry_demo`): each run points its `@champion` at the oldest
+# MAGIC version, which must never touch the segmenter the A/B decision job promotes.
 # MAGIC
 # MAGIC Deliberately **no accuracy metric**: the models are trained on
 # MAGIC calibrated-synthetic embeddings, so any accuracy here is a property of the
@@ -27,7 +29,7 @@ from mlflow.models import infer_signature
 from mlflow.tracking import MlflowClient
 from sklearn.linear_model import LogisticRegression
 
-MODEL = "main.steeldefect.steeldefect_segmenter"
+MODEL = "main.steeldefect.steeldefect_segmenter_registry_demo"
 N_GROUPS, CNN_DIM, N = 28, 960, 2500
 
 # synthetic embedding feature space (clearly not production data)

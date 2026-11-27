@@ -36,7 +36,6 @@ Python usage:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import random
@@ -63,6 +62,7 @@ from steeldefect_active_learning.ab_testing.metrics import (
     statistic_label,
 )
 from steeldefect_active_learning.ab_testing.promotion import decide_promotion
+from steeldefect_active_learning.ab_testing.serialization import dumps as json_dumps
 from steeldefect_active_learning.ab_testing.report import generate_ab_report
 from steeldefect_active_learning.active_learning.candidate_selector import (
     _auto_budget_strategy,
@@ -965,25 +965,10 @@ def _print_diagnostics(metrics: Dict[str, Any]) -> None:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _strict(obj):
-    """numpy scalars and arrays to Python values, and non-finite floats to None."""
-    if isinstance(obj, np.generic):
-        obj = obj.item()
-    if isinstance(obj, float):
-        return obj if np.isfinite(obj) else None
-    if isinstance(obj, np.ndarray):
-        return [_strict(v) for v in obj.tolist()]
-    if isinstance(obj, dict):
-        return {str(k): _strict(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_strict(v) for v in obj]
-    return obj
-
-
 def _dump_metrics_json(metrics: dict, path: str) -> None:
     """Write a dict as strict JSON: numpy types converted, NaN and infinities as null."""
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(_strict(metrics), f, indent=2, allow_nan=False)
+        f.write(json_dumps(metrics, indent=2))
 
 
 # ---------------------------------------------------------------------------

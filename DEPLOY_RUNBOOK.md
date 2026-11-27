@@ -96,10 +96,54 @@ Open the run in **Workflows → steeldefect-obt-daily → the run** and screensh
 optimize_obt). → **figure 1**.
 
 ## 7. MLflow → screenshot #2
-Run `databricks bundle run steeldefect_ab -t dev`. Its `nb_ab.py` registers two
-segmenter versions and sets the `champion` / `challenger` aliases; it logs no accuracy
-and runs no A/B test. In **Models**, screenshot the registered versions and their
-aliases. → **figure 2**.
+Run `databricks bundle run steeldefect_registry_demo -t dev`. Its `nb_ab.py` registers
+two versions of a demo model of its own (`main.steeldefect.steeldefect_segmenter_registry_demo`)
+and sets their `champion` / `challenger` aliases; it logs no accuracy and runs no A/B
+test. Each run points `@champion` at the oldest version, which is why it never writes the
+model the A/B decision promotes. In **Models**, screenshot the registered versions and
+their aliases. → **figure 2**.
+
+### The A/B decision (the tested gate)
+
+`steeldefect_ab_decision` runs the paired promotion gate through `run_task.py` on the
+model named by the bundle variable `segmenter_model`
+(`main.steeldefect.steeldefect_segmenter`, in the Unity Catalog registry):
+```bash
+databricks bundle run steeldefect_ab_decision -t dev \
+  --params eval_dataset_id=2026-05-eval,model_a_version=6,model_b_version=7
+```
+It reads two tables that the external training job must write:
+
+- `steeldefect.ab_eval_slices`: the slice, one row per image and one image per coil,
+  drawn from one sampling frame, scored by the champion `model_a_version` and the
+  challenger `model_b_version`;
+- `steeldefect.model_training_images`: the images each version was trained on, with
+  their coils, and `model_name` spelt in full as above. A version with no row there
+  fails the check: write the current champion's manifest before its first decision.
+
+The job then:
+
+1. refuses a second decision of the same challenger on the same slice: the same id, the
+   same images, or any image or coil in common with an earlier decision. A run on invalid
+   input does not count; a run with `promote=false` does, and leaves the registry alone,
+   so promoting B after it is a manual step;
+2. with `promote` (the default), checks that `@champion` still points at
+   `model_a_version` before it records anything: a wrong model name, an unreachable
+   registry or a champion that moved stops the run there, and the slice stays available;
+3. keeps A, with the reasons and no diagnostics, on a slice that breaks the contract or
+   shares an image or a coil with either version's training manifest;
+4. appends the slice's images to `steeldefect.ab_decision_images` and the decision to
+   `steeldefect.ab_decisions`, then, on `promote_B`, moves `@champion` to B only if it
+   still points at A, and appends the outcome as a second row: `applied`, `refused`,
+   `failed` or `unknown`. A promotion left unsettled (a crash between the two rows,
+   `failed`, `unknown`) is finished by the next run of the same decision (the same
+   `eval_dataset_id` and images, the same versions, `promote=true`).
+
+MLflow has no atomic compare-and-set on an alias: the job reads it, writes it, reads it
+back, and the bundle allows one run at a time. That covers one deployed job only: the
+`dev` and `prod` targets share the tables and the model, so run decisions from one
+target. The bundle has not been deployed with this job, and this repository writes
+neither table: the bundle runs no A/B decision until the training job writes both.
 
 ## 8. Delta history → screenshot #3
 In a SQL cell or notebook:
@@ -120,15 +164,15 @@ production results.
 ## Caveats (keep it honest)
 - **Data is synthetic.** The screenshots prove the platform *runs and is
   deployable*, not any production metric. Say so wherever the screenshots are shown.
-- **The seed, A/B and daily OBT jobs run stand-in notebooks.** On the serverless
-  workspace used, reading workspace `.py` files failed with
+- **The seed, registry demo and daily OBT jobs run stand-in notebooks.** On the
+  serverless workspace used, reading workspace `.py` files failed with
   `409 BlobCustomerSpecifiedEncryptionMismatch`, so the 7 tasks of these jobs run
   simplified, self-contained notebooks (`seed_notebook.py`, `nb_*.py`): for example a
   least-squares severity model with a fixed band instead of XGBoost + CQR, an append
   of a fixed synthetic batch instead of a `MERGE` at ingest, and a registry step with
-  no A/B test. The AL, regroup and SSL jobs call the tested package through
-  `steeldefect_platform/run_task.py`, which also imports workspace `.py` files, so
-  they are exposed to the same error on that workspace.
+  no A/B test. The AL, A/B decision, regroup and SSL jobs call the tested package
+  through `steeldefect_platform/run_task.py`, which also imports workspace `.py` files,
+  so they are exposed to the same error on that workspace.
 - **`segmenter_train` / `online_regroup`** are intentionally not in the bundle
   (external GPU training; continuous streaming) — documented in `databricks.yml`.
 - **State files**: `.gitignore` already excludes `.databricks/` and `*.tfstate*`, the
@@ -162,6 +206,11 @@ tasks auto-retry (`max_retries: 2`). The ingestion **data-quality gate** fails l
 | Job task failed | run logs (the dispatcher logs a full traceback) | rely on auto-retry; if persistent, fix + re-run the single task |
 | DQ gate raised (`data-quality gate failed`) | `steeldefect.obt_segmentations_deadletter` (`_dq_reason`) | fix the upstream landing schema/feed; re-ingest (MERGE is idempotent) |
 | Drift alarm | the `mmd2` / `p_value` verdict | trigger `segmenter_train` (external) → A/B gate; or `defect_regroup_train` |
+| A/B decision raised `@champion of … is v…, but the slice was scored by v…`, or a registry error, before any row | the MLflow Models page | nothing was recorded: fix the registry or the model name, or score a slice with the current champion, and run again |
+| A/B decision kept A, `conclusion = invalid_input` | the `valid_input` reason in the decision row's `verdict_json` | fix the slice or the training manifests and run again: invalid input does not count as a decision |
+| A/B decision failed: `promote_B was not applied` | the decision's two rows in `steeldefect.ab_decisions` (`promotion_status`, `promotion_detail`) | `refused`: `@champion` moved during the run; compare B with the new champion on a new slice. `failed`: a registry error, and `promotion_detail` says what `@champion` reads; once the registry is back, run the same decision again: it finishes the promotion, or records `refused` |
+| A/B decision failed: `promote_B may have been applied (unknown)` | `promotion_detail`, then `@champion` in the MLflow Models page | a registry error, and the alias could not be read back: B may or may not be the champion; run the same decision again: it reads the alias and finishes, or records, the promotion |
+| A/B decision raised `already has a decision on this slice` | the earlier decision's rows | none: one decision per challenger per slice; a new decision of this challenger needs a new `eval_dataset_id`, and images and coils that none of its earlier decisions used |
 | Streaming stalled | the checkpoint dir + stream status | restart the stream; Delta checkpoint resumes exactly-once |
 
 ### Rollback

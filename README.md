@@ -11,7 +11,7 @@ profiles.
 
 | Pipeline | What it does | Code |
 |---|---|---|
-| **P1: Active learning and A/B** | select the most informative images to label; decide model promotion with a paired, fail-closed statistical gate (`ab_testing/promotion.py`), which the CLI pipeline runs and reports (`ab_decision.json`, and the cover of the PDF report) on labelled predictions such as the demo set (with model checkpoints its A/B step does not read the images' labels yet, so the gate keeps A), and which the Databricks bundle does not run yet | `steeldefect_active_learning/` |
+| **P1: Active learning and A/B** | select the most informative images to label; decide model promotion with a paired, fail-closed statistical gate (`ab_testing/promotion.py`), which the CLI pipeline runs and reports (`ab_decision.json`, and the cover of the PDF report) on labelled predictions such as the demo set (with model checkpoints its A/B step does not read the images' labels yet, so the gate keeps A); the Databricks bundle declares an A/B decision job that runs it on a frozen slice and moves `@champion` only if it still points at the model B was compared with (not deployed yet; nothing in this repository writes the slice it reads) | `steeldefect_active_learning/` |
 | **P2: Defect regrouping** | fuse CNN and morphology features, discover defect families (mini-batch k-means by default; GMM, HDBSCAN, DP-GMM and a lightweight DeepDPM re-implementation as options) | `defect_clustering/` |
 | **P3: Datamining and cutting** | severity regression (XGBoost with conformalized quantile regression), then a guillotine cutting-plan optimizer | `datamining/` |
 | **P4: Self-supervised core** | self-supervised contrastive encoder (SimCLR / NT-Xent; an optional SimSiam comparison is off by default), open-set detection, generalized category discovery, continual NCM | `steeldefect_ssl/` |
@@ -107,18 +107,23 @@ scheduled workflows in a public repository after 60 days without activity.
 The repository implements MLOps patterns used in production systems (idempotent MERGE
 ingestion with dead-letter and data-quality gate, jobs DAG, MLflow alias-based registry,
 drift monitoring, A/B gate, serverless Databricks bundle, CI), validated on synthetic data
-and on CPU. In the Databricks bundle, the seed, A/B and daily OBT tasks (7 of 12) run
-simplified stand-in notebooks rather than the tested package (the A/B stand-in only
-registers two model versions and runs no A/B test); the header of `databricks.yml`
-explains why. At-scale Spark/Delta runs, real-data and GPU training,
-Unity Catalog governance and live dashboards are the next steps.
+and on CPU. In the Databricks bundle, the seed, registry demo and daily OBT tasks (7 of
+13) run simplified stand-in notebooks rather than the tested package (the registry demo
+only registers two model versions and runs no A/B test); the header of `databricks.yml`
+explains why. The A/B decision job runs the tested gate; it has not been deployed, and
+nothing in this repository writes the evaluation slice or the training manifests it reads.
+At-scale Spark/Delta runs, real-data and GPU training, Unity Catalog governance and live
+dashboards are the next steps.
 
 The A/B promotion gate assumes what it cannot check: the images of the evaluation slice
 are independent (one image per coil, or a cluster column with one image per cluster), the
 labels of the images on which A and B disagree were checked without seeing the model
 outputs, the slice was fixed before the models were scored, and `class_prior` describes
 the deployment stream. The shipped `class_prior` is the calibrated-synthetic prior of the
-P1 image generator, not plant data.
+P1 image generator, not plant data. The decision job checks part of this before the gate
+runs: one image per coil, one sampling frame, a slice scored by the two versions
+compared, no image or coil of the slice in either version's training manifest, and one
+decision per challenger per slice (a run on invalid input does not count).
 
 ## Layout
 
